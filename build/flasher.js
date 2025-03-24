@@ -8486,7 +8486,7 @@ var require_package6 = __commonJS({
   "../zwave-js/package.json"(exports5, module) {
     module.exports = {
       name: "zwave-js",
-      version: "15.0.0-beta.1",
+      version: "15.0.2",
       description: "Z-Wave driver written entirely in JavaScript/TypeScript",
       keywords: [],
       type: "module",
@@ -13326,6 +13326,12 @@ var ZnifferRegionLegacy;
   ZnifferRegionLegacy2[ZnifferRegionLegacy2["TF_840_3CH"] = 16] = "TF_840_3CH";
   ZnifferRegionLegacy2[ZnifferRegionLegacy2["TF_850_3CH"] = 17] = "TF_850_3CH";
 })(ZnifferRegionLegacy || (ZnifferRegionLegacy = {}));
+var ZnifferLRChannelConfig;
+(function(ZnifferLRChannelConfig2) {
+  ZnifferLRChannelConfig2[ZnifferLRChannelConfig2["Classic & LR A"] = 1] = "Classic & LR A";
+  ZnifferLRChannelConfig2[ZnifferLRChannelConfig2["Classic & LR B"] = 2] = "Classic & LR B";
+  ZnifferLRChannelConfig2[ZnifferLRChannelConfig2["LR A & B"] = 3] = "LR A & B";
+})(ZnifferLRChannelConfig || (ZnifferLRChannelConfig = {}));
 
 // ../core/build/esm/definitions/RSSI.js
 var RssiError;
@@ -21218,8 +21224,12 @@ var ZnifferFunctionType;
   ZnifferFunctionType2[ZnifferFunctionType2["GetFrequencies"] = 3] = "GetFrequencies";
   ZnifferFunctionType2[ZnifferFunctionType2["Start"] = 4] = "Start";
   ZnifferFunctionType2[ZnifferFunctionType2["Stop"] = 5] = "Stop";
+  ZnifferFunctionType2[ZnifferFunctionType2["SetLRChannelConfig"] = 6] = "SetLRChannelConfig";
+  ZnifferFunctionType2[ZnifferFunctionType2["GetLRChannelConfigs"] = 7] = "GetLRChannelConfigs";
+  ZnifferFunctionType2[ZnifferFunctionType2["GetLRRegions"] = 8] = "GetLRRegions";
   ZnifferFunctionType2[ZnifferFunctionType2["SetBaudRate"] = 14] = "SetBaudRate";
   ZnifferFunctionType2[ZnifferFunctionType2["GetFrequencyInfo"] = 19] = "GetFrequencyInfo";
+  ZnifferFunctionType2[ZnifferFunctionType2["GetLRChannelConfigInfo"] = 20] = "GetLRChannelConfigInfo";
 })(ZnifferFunctionType || (ZnifferFunctionType = {}));
 var ZnifferMessageType;
 (function(ZnifferMessageType2) {
@@ -103632,7 +103642,7 @@ var import_satisfies = __toESM(require_satisfies(), 1);
 var import_valid = __toESM(require_valid(), 1);
 
 // ../config/build/esm/_version.js
-var PACKAGE_VERSION = "15.0.0-beta.1";
+var PACKAGE_VERSION = "15.0.1";
 
 // ../config/build/esm/utils.js
 var configDir = import.meta.url.startsWith("file:") ? posix.join(posix.dirname(fileURLToPath(import.meta.url)), import.meta.url.endsWith("src/utils.ts") ? ".." : "../..", "config") : import.meta.resolve("/config");
@@ -107039,8 +107049,999 @@ var ConfigManager = class {
   }
 };
 
-// ../zwave-js/build/esm/lib/node/Node.js
+// ../zwave-js/build/esm/lib/node/CCHandlers/_shared.js
+var MAX_ASSOCIATIONS = 1;
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/AssociationCC.js
+async function handleAssociationGet(ctx, controller, node, command) {
+  const groupId = 1;
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  const nodeIds = controller.associations.filter((a) => a.endpoint == void 0).map((a) => a.nodeId) ?? [];
+  await api.sendReport({
+    groupId,
+    maxNodes: MAX_ASSOCIATIONS,
+    nodeIds,
+    reportsToFollow: 0
+  });
+}
+__name(handleAssociationGet, "handleAssociationGet");
+function handleAssociationSet(ctx, controller, node, command) {
+  if (command.groupId !== 1) {
+    throw new ZWaveError(`Association group ${command.groupId} is not supported.`, ZWaveErrorCodes.CC_OperationFailed);
+  }
+  const newAssociations = command.nodeIds.filter((newNodeId) => !controller.associations.some(({ nodeId, endpoint }) => endpoint === void 0 && nodeId === newNodeId)).map((nodeId) => ({ nodeId }));
+  const associations = [...controller.associations];
+  associations.push(...newAssociations);
+  if (associations.length > MAX_ASSOCIATIONS) {
+    throw new ZWaveError(`Association group ${command.groupId} is full`, ZWaveErrorCodes.CC_OperationFailed);
+  }
+  controller.associations = associations;
+}
+__name(handleAssociationSet, "handleAssociationSet");
+function handleAssociationRemove(ctx, controller, node, command) {
+  if (!!command.groupId && command.groupId !== 1) {
+    return;
+  }
+  if (!command.nodeIds?.length) {
+    controller.associations = [];
+  } else {
+    controller.associations = controller.associations.filter(({ nodeId, endpoint }) => endpoint === void 0 && !command.nodeIds.includes(nodeId));
+  }
+}
+__name(handleAssociationRemove, "handleAssociationRemove");
+async function handleAssociationSpecificGroupGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportSpecificGroup(0);
+}
+__name(handleAssociationSpecificGroupGet, "handleAssociationSpecificGroupGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/AssociationGroupInformationCC.js
+async function handleAGINameGet(ctx, node, command) {
+  if (command.groupId !== 1) {
+    return;
+  }
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportGroupName(1, "Lifeline");
+}
+__name(handleAGINameGet, "handleAGINameGet");
+async function handleAGIInfoGet(ctx, node, command) {
+  if (!command.listMode && command.groupId !== 1) {
+    return;
+  }
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportGroupInfo({
+    isListMode: command.listMode ?? false,
+    hasDynamicInfo: false,
+    groups: [
+      {
+        groupId: 1,
+        eventCode: 0,
+        // ignored anyways
+        profile: AssociationGroupInfoProfile["General: Lifeline"],
+        mode: 0
+        // ignored anyways
+      }
+    ]
+  });
+}
+__name(handleAGIInfoGet, "handleAGIInfoGet");
+async function handleAGICommandListGet(ctx, node, command) {
+  if (command.groupId !== 1) {
+    return;
+  }
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportCommands(command.groupId, /* @__PURE__ */ new Map([
+    [
+      CommandClasses["Device Reset Locally"],
+      [DeviceResetLocallyCommand.Notification]
+    ]
+  ]));
+}
+__name(handleAGICommandListGet, "handleAGICommandListGet");
+async function handleAssociationSupportedGroupingsGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportGroupCount(1);
+}
+__name(handleAssociationSupportedGroupingsGet, "handleAssociationSupportedGroupingsGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/BasicCC.js
+function handleBasicCommand(ctx, node, command) {
+  const sourceEndpoint = node.getEndpoint(command.endpointIndex ?? 0) ?? node;
+  let mappedTargetCC;
+  switch (sourceEndpoint.deviceClass?.generic.key) {
+    case 32:
+      mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
+      break;
+    case 16:
+      mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Switch"]);
+      break;
+    case 17:
+      mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Multilevel Switch"]);
+      break;
+    case 18:
+      switch (sourceEndpoint.deviceClass.specific.key) {
+        case 1:
+          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Switch"]);
+          break;
+        case 2:
+          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Multilevel Switch"]);
+          break;
+      }
+  }
+  if (command instanceof BasicCCReport) {
+    const basicReportMapping = node.deviceConfig?.compat?.mapBasicReport ?? "auto";
+    if (basicReportMapping === "Binary Sensor") {
+      mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
+      if (typeof command.currentValue === "number") {
+        if (mappedTargetCC) {
+          ctx.logNode(node.id, {
+            endpoint: command.endpointIndex,
+            message: "treating BasicCC::Report as a BinarySensorCC::Report"
+          });
+          mappedTargetCC.setMappedBasicValue(ctx, command.currentValue);
+        } else {
+          ctx.logNode(node.id, {
+            endpoint: command.endpointIndex,
+            message: "cannot treat BasicCC::Report as a BinarySensorCC::Report, because the Binary Sensor CC is not supported",
+            level: "warn"
+          });
+        }
+      } else {
+        ctx.logNode(node.id, {
+          endpoint: command.endpointIndex,
+          message: "cannot map BasicCC::Report to a different CC, because the current value is unknown",
+          level: "warn"
+        });
+      }
+    } else if (basicReportMapping === "auto" || basicReportMapping === false) {
+      const didSetMappedValue = typeof command.currentValue === "number" && basicReportMapping === "auto" && mappedTargetCC?.setMappedBasicValue(ctx, command.currentValue);
+      if (!didSetMappedValue) {
+        command.persistValues(ctx);
+      }
+    }
+  } else if (command instanceof BasicCCSet) {
+    const basicSetMapping = node.deviceConfig?.compat?.mapBasicSet ?? "report";
+    if (basicSetMapping === "event") {
+      ctx.logNode(node.id, {
+        endpoint: command.endpointIndex,
+        message: "treating BasicCC::Set as a value event"
+      });
+      node.valueDB.setValue(BasicCCValues.compatEvent.endpoint(command.endpointIndex), command.targetValue, {
+        stateful: false
+      });
+    } else if (basicSetMapping === "Binary Sensor") {
+      mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
+      if (mappedTargetCC) {
+        ctx.logNode(node.id, {
+          endpoint: command.endpointIndex,
+          message: "treating BasicCC::Set as a BinarySensorCC::Report"
+        });
+        mappedTargetCC.setMappedBasicValue(ctx, command.targetValue);
+      } else {
+        ctx.logNode(node.id, {
+          endpoint: command.endpointIndex,
+          message: "cannot treat BasicCC::Set as a BinarySensorCC::Report, because the Binary Sensor CC is not supported",
+          level: "warn"
+        });
+      }
+    } else if (!node.deviceConfig?.compat?.mapBasicSet && !!(command.encapsulationFlags & EncapsulationFlags.Supervision)) {
+      if (command.encapsulationFlags & EncapsulationFlags.Supervision) {
+        throw new ZWaveError("Basic CC is not supported", ZWaveErrorCodes.CC_NotSupported);
+      }
+    } else if (basicSetMapping === "auto" || basicSetMapping === "report") {
+      ctx.logNode(node.id, {
+        endpoint: command.endpointIndex,
+        message: "treating BasicCC::Set as a report"
+      });
+      const didSetMappedValue = basicSetMapping === "auto" && !!mappedTargetCC?.setMappedBasicValue(ctx, command.targetValue);
+      if (!didSetMappedValue) {
+        node.valueDB.setValue(BasicCCValues.currentValue.endpoint(command.endpointIndex), command.targetValue);
+        if (!sourceEndpoint.controlsCC(CommandClasses.Basic)) {
+          sourceEndpoint.addCC(CommandClasses.Basic, {
+            isControlled: true
+          });
+        }
+      }
+    }
+  }
+}
+__name(handleBasicCommand, "handleBasicCommand");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/BinarySwitchCC.js
+function handleBinarySwitchCommand(ctx, node, command) {
+  if (command instanceof BinarySwitchCCSet && node.deviceConfig?.compat?.treatSetAsReport?.has(command.constructor.name)) {
+    ctx.logNode(node.id, {
+      endpoint: command.endpointIndex,
+      message: "treating BinarySwitchCC::Set as a report"
+    });
+    node.valueDB.setValue(BinarySwitchCCValues.currentValue.endpoint(command.endpointIndex), command.targetValue);
+  }
+}
+__name(handleBinarySwitchCommand, "handleBinarySwitchCommand");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/CentralSceneCC.js
+function getDefaultCentralSceneHandlerStore() {
+  return {
+    keyHeldDownContext: void 0,
+    lastSequenceNumber: void 0,
+    forcedKeyUp: false
+  };
+}
+__name(getDefaultCentralSceneHandlerStore, "getDefaultCentralSceneHandlerStore");
+function handleCentralSceneNotification(ctx, node, command, store) {
+  if (command.sequenceNumber === store.lastSequenceNumber) {
+    return;
+  } else {
+    store.lastSequenceNumber = command.sequenceNumber;
+  }
+  const setSceneValue = /* @__PURE__ */ __name((sceneNumber, key) => {
+    const valueId = CentralSceneCCValues.scene(sceneNumber).id;
+    node.valueDB.setValue(valueId, key, { stateful: false });
+  }, "setSceneValue");
+  const forceKeyUp = /* @__PURE__ */ __name(() => {
+    store.forcedKeyUp = true;
+    setSceneValue(store.keyHeldDownContext.sceneNumber, CentralSceneKeys.KeyReleased);
+    store.keyHeldDownContext?.timeout?.clear();
+    store.keyHeldDownContext = void 0;
+  }, "forceKeyUp");
+  if (store.keyHeldDownContext && store.keyHeldDownContext.sceneNumber !== command.sceneNumber) {
+    forceKeyUp();
+  }
+  const slowRefreshValueId = CentralSceneCCValues.slowRefresh.endpoint(command.endpointIndex);
+  if (command.keyAttribute === CentralSceneKeys.KeyHeldDown) {
+    store.forcedKeyUp = false;
+    store.keyHeldDownContext?.timeout?.clear();
+    const slowRefresh = command.slowRefresh ?? node.valueDB.getValue(slowRefreshValueId);
+    store.keyHeldDownContext = {
+      sceneNumber: command.sceneNumber,
+      // Unref'ing long running timers allows the process to exit mid-timeout
+      timeout: setTimer(forceKeyUp, slowRefresh ? 6e4 : 400).unref()
+    };
+  } else if (command.keyAttribute === CentralSceneKeys.KeyReleased) {
+    if (store.keyHeldDownContext) {
+      store.keyHeldDownContext.timeout.clear();
+      store.keyHeldDownContext = void 0;
+    } else if (store.forcedKeyUp) {
+      node.valueDB.setValue(slowRefreshValueId, true);
+      return;
+    }
+  }
+  setSceneValue(command.sceneNumber, command.keyAttribute);
+  ctx.logNode(node.id, {
+    message: `received CentralScene notification ${stringify(command)}`,
+    direction: "inbound"
+  });
+}
+__name(handleCentralSceneNotification, "handleCentralSceneNotification");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/ClockCC.js
+function getDefaultClockHandlerStore() {
+  return {
+    busySettingClock: false
+  };
+}
+__name(getDefaultClockHandlerStore, "getDefaultClockHandlerStore");
+async function handleClockReport(ctx, node, command, store) {
+  if (store.busySettingClock)
+    return;
+  const endpoint = node.getEndpoint(command.endpointIndex);
+  if (!endpoint)
+    return;
+  let now = /* @__PURE__ */ new Date();
+  const seconds = now.getSeconds();
+  if (seconds >= 30) {
+    now = new Date(now.getTime() + (60 - seconds) * 1e3);
+  }
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  let weekday = now.getDay();
+  if (weekday === 0)
+    weekday = 7;
+  if (command.weekday !== weekday || command.hour !== hours || command.minute !== minutes) {
+    ctx.logNode(node.id, `detected a deviation of the node's clock, updating it...`);
+    try {
+      store.busySettingClock = true;
+      await endpoint.commandClasses.Clock.set(hours, minutes, weekday);
+    } catch {
+    } finally {
+      store.busySettingClock = false;
+    }
+  }
+}
+__name(handleClockReport, "handleClockReport");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/DeviceResetLocallyCC.js
+function handleDeviceResetLocallyNotification(ctx, controller, node, cmd) {
+  if (cmd.endpointIndex !== 0) {
+    ctx.logNode(node.id, {
+      message: `Received reset locally notification from non-root endpoint - ignoring it...`,
+      direction: "inbound"
+    });
+    return;
+  }
+  setTimeout(async () => {
+    ctx.logNode(node.id, {
+      message: `The node was reset locally, removing it`,
+      direction: "inbound"
+    });
+    try {
+      await controller.removeFailedNodeInternal(node.id, RemoveNodeReason.Reset);
+    } catch (e) {
+      ctx.logNode(node.id, {
+        message: `removing the node failed: ${getErrorMessage(e)}`,
+        level: "error"
+      });
+    }
+  }, 500);
+}
+__name(handleDeviceResetLocallyNotification, "handleDeviceResetLocallyNotification");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/EntryControlCC.js
+function getDefaultEntryControlHandlerStore() {
+  return {
+    recentSequenceNumbers: []
+  };
+}
+__name(getDefaultEntryControlHandlerStore, "getDefaultEntryControlHandlerStore");
+function handleEntryControlNotification(ctx, node, command, store) {
+  if (!node.deviceConfig?.compat?.disableStrictEntryControlDataValidation) {
+    if (store.recentSequenceNumbers.includes(command.sequenceNumber)) {
+      ctx.logNode(node.id, `Received duplicate Entry Control Notification (sequence number ${command.sequenceNumber}), ignoring...`, "warn");
+      return;
+    }
+    store.recentSequenceNumbers.unshift(command.sequenceNumber);
+    if (store.recentSequenceNumbers.length > 5) {
+      store.recentSequenceNumbers.pop();
+    }
+  }
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  node.emit("notification", endpoint, CommandClasses["Entry Control"], {
+    ...pick(command, ["eventType", "dataType", "eventData"]),
+    eventTypeLabel: entryControlEventTypeLabels[command.eventType],
+    dataTypeLabel: getEnumMemberName(EntryControlDataTypes, command.dataType)
+  });
+}
+__name(handleEntryControlNotification, "handleEntryControlNotification");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/HailCC.js
+function getDefaultHailHandlerStore() {
+  return {
+    busyPolling: false
+  };
+}
+__name(getDefaultHailHandlerStore, "getDefaultHailHandlerStore");
+async function handleHail(ctx, node, _command, store) {
+  node.markAsAwake();
+  if (store.busyPolling) {
+    ctx.logNode(node.id, {
+      message: `Hail received from node, but still busy with previous one...`
+    });
+    return;
+  }
+  ctx.logNode(node.id, {
+    message: `Hail received from node, refreshing actuator and sensor values...`
+  });
+  try {
+    store.busyPolling = true;
+    await node.refreshValues();
+  } catch {
+  } finally {
+    store.busyPolling = false;
+  }
+}
+__name(handleHail, "handleHail");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/IndicatorCC.js
+function handleIndicatorSupportedGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  switch (command.indicatorId) {
+    case 0:
+    // 0 must be answered with the first supported indicator ID.
+    // We only support identify (0x50)
+    case 80:
+      return api.reportSupported(80, [3, 4, 5], 0);
+    default:
+      return api.reportSupported(0, [], 0);
+  }
+}
+__name(handleIndicatorSupportedGet, "handleIndicatorSupportedGet");
+function handleIndicatorSet(ctx, controller, node, command) {
+  if (command.values?.length !== 3)
+    return;
+  const [v1, v2, v3] = command.values;
+  if (v1.indicatorId !== 80 || v1.propertyId !== 3)
+    return;
+  if (v2.indicatorId !== 80 || v2.propertyId !== 4)
+    return;
+  if (v3.indicatorId !== 80 || v3.propertyId !== 5)
+    return;
+  const store = controller.indicatorValues;
+  store.set(80, [v1, v2, v3]);
+  ctx.logNode(node.id, {
+    message: "Received identify command",
+    direction: "inbound"
+  });
+  controller.emit("identify", node);
+}
+__name(handleIndicatorSet, "handleIndicatorSet");
+async function handleIndicatorGet(ctx, controller, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  if (command.indicatorId === 80) {
+    const values = controller.indicatorValues.get(80) ?? [
+      { indicatorId: 80, propertyId: 3, value: 0 },
+      { indicatorId: 80, propertyId: 4, value: 0 },
+      { indicatorId: 80, propertyId: 5, value: 0 }
+    ];
+    await api.sendReport({ values });
+  } else if (typeof command.indicatorId === "number") {
+    await api.sendReport({
+      values: [
+        {
+          indicatorId: command.indicatorId,
+          propertyId: 0,
+          value: 0
+        }
+      ]
+    });
+  } else {
+    await api.sendReport({ value: 0 });
+  }
+}
+__name(handleIndicatorGet, "handleIndicatorGet");
+async function handleIndicatorDescriptionGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportDescription(command.indicatorId, "");
+}
+__name(handleIndicatorDescriptionGet, "handleIndicatorDescriptionGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/ManufacturerSpecificCC.js
+async function handleManufacturerSpecificGet(ctx, node, command, vendorInfo) {
+  const api = node.createAPI(CommandClasses["Manufacturer Specific"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.sendReport({
+    // Reserved manufacturer ID, definitely invalid!
+    manufacturerId: vendorInfo?.manufacturerId ?? 65535,
+    productType: vendorInfo?.productType ?? 65535,
+    productId: vendorInfo?.productId ?? 65535
+  });
+}
+__name(handleManufacturerSpecificGet, "handleManufacturerSpecificGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/MultiChannelAssociationCC.js
+async function handleMultiChannelAssociationSupportedGroupingsGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses["Multi Channel Association"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportGroupCount(1);
+}
+__name(handleMultiChannelAssociationSupportedGroupingsGet, "handleMultiChannelAssociationSupportedGroupingsGet");
+async function handleMultiChannelAssociationGet(ctx, controller, node, command) {
+  const groupId = 1;
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses["Multi Channel Association"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  const nodeIds = controller.associations.filter((a) => a.endpoint == void 0).map((a) => a.nodeId) ?? [];
+  const endpoints = controller.associations.filter((a) => a.endpoint != void 0).map(({ nodeId, endpoint: endpoint2 }) => ({
+    nodeId,
+    endpoint: endpoint2
+  })) ?? [];
+  await api.sendReport({
+    groupId,
+    maxNodes: MAX_ASSOCIATIONS,
+    nodeIds,
+    endpoints,
+    reportsToFollow: 0
+  });
+}
+__name(handleMultiChannelAssociationGet, "handleMultiChannelAssociationGet");
+function handleMultiChannelAssociationSet(ctx, controller, node, command) {
+  if (command.groupId !== 1) {
+    throw new ZWaveError(`Multi Channel Association group ${command.groupId} is not supported.`, ZWaveErrorCodes.CC_OperationFailed);
+  }
+  const newNodeIdAssociations = command.nodeIds.filter((newNodeId) => !controller.associations.some(({ nodeId, endpoint }) => endpoint === void 0 && nodeId === newNodeId)).map((nodeId) => ({ nodeId }));
+  const newEndpointAssociations = command.endpoints.flatMap(({ nodeId, endpoint }) => {
+    if (typeof endpoint === "number") {
+      return { nodeId, endpoint };
+    } else {
+      return endpoint.map((e) => ({ nodeId, endpoint: e }));
+    }
+  }).filter(({ nodeId: newNodeId, endpoint: newEndpoint }) => !controller.associations.some(({ nodeId, endpoint }) => nodeId === newNodeId && endpoint === newEndpoint));
+  const associations = [...controller.associations];
+  associations.push(...newNodeIdAssociations, ...newEndpointAssociations);
+  if (associations.length > MAX_ASSOCIATIONS) {
+    throw new ZWaveError(`Multi Channel Association group ${command.groupId} is full`, ZWaveErrorCodes.CC_OperationFailed);
+  }
+  controller.associations = associations.slice(0, MAX_ASSOCIATIONS);
+}
+__name(handleMultiChannelAssociationSet, "handleMultiChannelAssociationSet");
+function handleMultiChannelAssociationRemove(ctx, controller, node, command) {
+  if (!!command.groupId && command.groupId !== 1) {
+    return;
+  }
+  if (!command.nodeIds?.length && !command.endpoints?.length) {
+    controller.associations = [];
+  } else {
+    let associations = [...controller.associations];
+    if (command.nodeIds?.length) {
+      associations = associations.filter(({ nodeId, endpoint }) => endpoint === void 0 && !command.nodeIds.includes(nodeId));
+    }
+    if (command.endpoints?.length) {
+      associations = associations.filter(({ nodeId, endpoint }) => !command.endpoints.some((dest) => dest.nodeId === nodeId && dest.endpoint === endpoint));
+    }
+    controller.associations = associations;
+  }
+}
+__name(handleMultiChannelAssociationRemove, "handleMultiChannelAssociationRemove");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/MultilevelSwitchCC.js
+function handleMultilevelSwitchCommand(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex ?? 0) ?? node;
+  if (command instanceof MultilevelSwitchCCSet) {
+    ctx.logNode(node.id, {
+      endpoint: command.endpointIndex,
+      message: "treating MultiLevelSwitchCCSet::Set as a value event"
+    });
+    node.valueDB.setValue(MultilevelSwitchCCValues.compatEvent.endpoint(command.endpointIndex), command.targetValue, {
+      stateful: false
+    });
+  } else if (command instanceof MultilevelSwitchCCStartLevelChange) {
+    ctx.logNode(node.id, {
+      endpoint: command.endpointIndex,
+      message: "treating MultilevelSwitchCC::StartLevelChange as a notification"
+    });
+    node.emit("notification", endpoint, CommandClasses["Multilevel Switch"], {
+      eventType: MultilevelSwitchCommand.StartLevelChange,
+      eventTypeLabel: "Start level change",
+      direction: command.direction
+    });
+  } else if (command instanceof MultilevelSwitchCCStopLevelChange) {
+    ctx.logNode(node.id, {
+      endpoint: command.endpointIndex,
+      message: "treating MultilevelSwitchCC::StopLevelChange as a notification"
+    });
+    node.emit("notification", endpoint, CommandClasses["Multilevel Switch"], {
+      eventType: MultilevelSwitchCommand.StopLevelChange,
+      eventTypeLabel: "Stop level change"
+    });
+  }
+}
+__name(handleMultilevelSwitchCommand, "handleMultilevelSwitchCommand");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/NotificationCC.js
+function getDefaultNotificationHandlerStore() {
+  return {
+    idleTimeouts: /* @__PURE__ */ new Map()
+  };
+}
+__name(getDefaultNotificationHandlerStore, "getDefaultNotificationHandlerStore");
+function handleNotificationReport(ctx, node, command, store) {
+  if (command.notificationType == void 0) {
+    if (command.alarmType == void 0) {
+      ctx.logNode(node.id, {
+        message: `received unsupported notification ${stringify(command)}`,
+        direction: "inbound"
+      });
+    }
+    return;
+  }
+  const ccVersion = getEffectiveCCVersion(ctx, command);
+  const notification = getNotification(command.notificationType);
+  if (notification) {
+    const notificationName = notification.name;
+    ctx.logNode(node.id, {
+      message: `[handleNotificationReport] notificationName: ${notificationName}`,
+      level: "silly"
+    });
+    const setStateIdle = /* @__PURE__ */ __name((prevValue) => {
+      manuallyIdleNotificationValueInternal(ctx, node, store, notification, prevValue, command.endpointIndex);
+    }, "setStateIdle");
+    const setUnknownStateIdle = /* @__PURE__ */ __name((prevValue) => {
+      const unknownNotificationVariableValueId = NotificationCCValues.unknownNotificationVariable(command.notificationType, notificationName).endpoint(command.endpointIndex);
+      const currentValue = node.valueDB.getValue(unknownNotificationVariableValueId);
+      if (currentValue == void 0)
+        return;
+      if (prevValue == void 0 || currentValue === prevValue) {
+        node.valueDB.setValue(unknownNotificationVariableValueId, 0);
+      }
+    }, "setUnknownStateIdle");
+    const value = command.notificationEvent;
+    if (value === 0) {
+      if (isUint8Array(command.eventParameters) && command.eventParameters.length) {
+        setStateIdle(command.eventParameters[0]);
+        setUnknownStateIdle(command.eventParameters[0]);
+      } else {
+        const nonIdleValues = node.valueDB.getValues(CommandClasses.Notification).filter((v) => (v.endpoint || 0) === command.endpointIndex && v.property === notificationName && typeof v.value === "number" && v.value !== 0);
+        for (const v of nonIdleValues) {
+          setStateIdle(v.value);
+        }
+        setUnknownStateIdle();
+      }
+      return;
+    }
+    const valueConfig = getNotificationValue(notification, value);
+    if (valueConfig) {
+      ctx.logNode(node.id, {
+        message: `[handleNotificationReport] valueConfig:
+  label: ${valueConfig.label}
+  ${valueConfig.type === "event" ? "type: event" : `type: state
+  variableName: ${valueConfig.variableName}`}`,
+        level: "silly"
+      });
+    } else {
+      ctx.logNode(node.id, {
+        message: `[handleNotificationReport] valueConfig: undefined`,
+        level: "silly"
+      });
+    }
+    handleKnownNotification(node, command);
+    let allowIdleReset;
+    if (!valueConfig) {
+      allowIdleReset = false;
+    } else if (valueConfig.type === "state") {
+      allowIdleReset = valueConfig.idle;
+    } else {
+      const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+      node.emit("notification", endpoint, CommandClasses.Notification, {
+        type: command.notificationType,
+        event: value,
+        label: notification.name,
+        eventLabel: valueConfig.label,
+        parameters: command.eventParameters
+      });
+      if (valueConfig.idleVariables?.length) {
+        for (const variable of valueConfig.idleVariables) {
+          setStateIdle(variable);
+        }
+      }
+      return;
+    }
+    let valueId;
+    if (valueConfig) {
+      valueId = NotificationCCValues.notificationVariable(notificationName, valueConfig.variableName).endpoint(command.endpointIndex);
+      extendNotificationValueMetadata(ctx, node, valueId, notification, valueConfig);
+    } else {
+      const unknownValue = NotificationCCValues.unknownNotificationVariable(command.notificationType, notificationName);
+      valueId = unknownValue.endpoint(command.endpointIndex);
+      if (ccVersion >= 2) {
+        if (!node.valueDB.hasMetadata(valueId)) {
+          node.valueDB.setMetadata(valueId, unknownValue.meta);
+        }
+      }
+    }
+    if (typeof command.eventParameters === "number") {
+      const enumBehavior = valueConfig ? getNotificationEnumBehavior(notification, valueConfig) : "extend";
+      const valueWithEnum = enumBehavior === "replace" ? command.eventParameters : getNotificationStateValueWithEnum(value, command.eventParameters);
+      node.valueDB.setValue(valueId, valueWithEnum);
+    } else {
+      node.valueDB.setValue(valueId, value);
+    }
+    if (allowIdleReset && !!node.deviceConfig?.compat?.forceNotificationIdleReset) {
+      ctx.logNode(node.id, {
+        message: `[handleNotificationReport] scheduling idle reset`,
+        level: "silly"
+      });
+      scheduleNotificationIdleReset(store, valueId, () => setStateIdle(value));
+    }
+  } else {
+    const unknownValue = NotificationCCValues.unknownNotificationType(command.notificationType);
+    const valueId = unknownValue.endpoint(command.endpointIndex);
+    if (ccVersion >= 2) {
+      if (!node.valueDB.hasMetadata(valueId)) {
+        node.valueDB.setMetadata(valueId, unknownValue.meta);
+      }
+    }
+    node.valueDB.setValue(valueId, command.notificationEvent);
+  }
+}
+__name(handleNotificationReport, "handleNotificationReport");
+function handleKnownNotification(node, command) {
+  const lockEvents = [1, 3, 5, 9];
+  const unlockEvents = [2, 4, 6];
+  const doorStatusEvents = [
+    // Actual status
+    22,
+    23,
+    // Synthetic status with enum
+    5632,
+    5633
+  ];
+  if (
+    // Access Control, manual/keypad/rf/auto (un)lock operation
+    command.notificationType === 6 && (lockEvents.includes(command.notificationEvent) || unlockEvents.includes(command.notificationEvent)) && (node.supportsCC(CommandClasses["Door Lock"]) || node.supportsCC(CommandClasses.Lock))
+  ) {
+    const isLocked = lockEvents.includes(command.notificationEvent);
+    if (node.supportsCC(CommandClasses["Door Lock"])) {
+      node.valueDB.setValue(DoorLockCCValues.currentMode.endpoint(command.endpointIndex), isLocked ? DoorLockMode.Secured : DoorLockMode.Unsecured);
+    }
+    if (node.supportsCC(CommandClasses.Lock)) {
+      node.valueDB.setValue(LockCCValues.locked.endpoint(command.endpointIndex), isLocked);
+    }
+  } else if (command.notificationType === 6 && doorStatusEvents.includes(command.notificationEvent)) {
+    node.valueDB.setValue(NotificationCCValues.doorStateSimple.endpoint(command.endpointIndex), command.notificationEvent === 23 ? 23 : 22);
+    const tiltValue = NotificationCCValues.doorTiltState;
+    const tiltValueId = tiltValue.endpoint(command.endpointIndex);
+    let tiltValueWasCreated = node.valueDB.hasMetadata(tiltValueId);
+    if (command.eventParameters === 1 && !tiltValueWasCreated) {
+      node.valueDB.setMetadata(tiltValueId, tiltValue.meta);
+      tiltValueWasCreated = true;
+    }
+    if (tiltValueWasCreated) {
+      node.valueDB.setValue(tiltValueId, command.eventParameters === 1 ? 1 : 0);
+    }
+  }
+}
+__name(handleKnownNotification, "handleKnownNotification");
+function manuallyIdleNotificationValueInternal(ctx, node, store, notification, prevValue, endpointIndex) {
+  const valueConfig = getNotificationValue(notification, prevValue);
+  if (!valueConfig || valueConfig.type !== "state")
+    return;
+  if (!valueConfig.idle)
+    return;
+  const notificationName = notification.name;
+  const variableName = valueConfig.variableName;
+  const valueId = NotificationCCValues.notificationVariable(notificationName, variableName).endpoint(endpointIndex);
+  if (node.valueDB.getValue(valueId) !== prevValue)
+    return;
+  clearNotificationIdleReset(store, valueId);
+  extendNotificationValueMetadata(ctx, node, valueId, notification, valueConfig);
+  node.valueDB.setValue(
+    valueId,
+    0
+    /* idle */
+  );
+}
+__name(manuallyIdleNotificationValueInternal, "manuallyIdleNotificationValueInternal");
+function scheduleNotificationIdleReset(store, valueId, handler) {
+  clearNotificationIdleReset(store, valueId);
+  const key = valueIdToString(valueId);
+  store.idleTimeouts.set(
+    key,
+    // Unref'ing long running timeouts allows to quit the application before the timeout elapses
+    setTimer(
+      handler,
+      5 * 60 * 1e3
+      /* 5 minutes */
+    ).unref()
+  );
+}
+__name(scheduleNotificationIdleReset, "scheduleNotificationIdleReset");
+function clearNotificationIdleReset(store, valueId) {
+  const key = valueIdToString(valueId);
+  if (store.idleTimeouts.has(key)) {
+    store.idleTimeouts.get(key)?.clear();
+    store.idleTimeouts.delete(key);
+  }
+}
+__name(clearNotificationIdleReset, "clearNotificationIdleReset");
+function extendNotificationValueMetadata(ctx, node, valueId, notification, valueConfig) {
+  const ccVersion = ctx.getSupportedCCVersion(CommandClasses.Notification, node.id, node.index);
+  if (ccVersion === 2 || !node.valueDB.hasMetadata(valueId)) {
+    const metadata = getNotificationValueMetadata(node.valueDB.getMetadata(valueId), notification, valueConfig);
+    node.valueDB.setMetadata(valueId, metadata);
+  }
+}
+__name(extendNotificationValueMetadata, "extendNotificationValueMetadata");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/PowerlevelCC.js
+function handlePowerlevelSet(driver2, node, command) {
+  if (!(command.powerlevel in Powerlevel)) {
+    throw new ZWaveError(`Invalid powerlevel ${command.powerlevel}.`, ZWaveErrorCodes.CC_OperationFailed);
+  }
+  driver2.controller.powerlevel = {
+    powerlevel: command.powerlevel,
+    until: command.timeout ? new Date(Date.now() + command.timeout * 1e3) : /* @__PURE__ */ new Date()
+  };
+}
+__name(handlePowerlevelSet, "handlePowerlevelSet");
+async function handlePowerlevelGet(driver2, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  const { powerlevel, until } = driver2.controller.powerlevel;
+  if (
+    // Setting elapsed
+    until.getTime() < Date.now() || powerlevel === Powerlevel["Normal Power"]
+  ) {
+    await api.reportPowerlevel({
+      powerlevel: Powerlevel["Normal Power"]
+    });
+  } else {
+    const timeoutSeconds = Math.max(0, Math.min(Math.round((until.getTime() - Date.now()) / 1e3), 255));
+    await api.reportPowerlevel({
+      powerlevel,
+      timeout: timeoutSeconds
+    });
+  }
+}
+__name(handlePowerlevelGet, "handlePowerlevelGet");
+async function handlePowerlevelTestNodeSet(driver2, node, command) {
+  if (!(command.powerlevel in Powerlevel)) {
+    throw new ZWaveError(`Invalid powerlevel ${command.powerlevel}.`, ZWaveErrorCodes.CC_OperationFailed);
+  } else if (command.testFrameCount < 1) {
+    throw new ZWaveError("testFrameCount must be at least 1", ZWaveErrorCodes.CC_OperationFailed);
+  }
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  try {
+    const acknowledgedFrames = await driver2.sendNOPPowerFrames(command.testNodeId, command.powerlevel, command.testFrameCount);
+    void api.sendNodeTestReport({
+      status: acknowledgedFrames > 0 ? PowerlevelTestStatus.Success : PowerlevelTestStatus.Failed,
+      testNodeId: command.testNodeId,
+      acknowledgedFrames
+    }).catch(noop);
+  } catch {
+    void api.sendNodeTestReport({
+      status: PowerlevelTestStatus.Failed,
+      testNodeId: command.testNodeId,
+      acknowledgedFrames: 0
+    }).catch(noop);
+  }
+}
+__name(handlePowerlevelTestNodeSet, "handlePowerlevelTestNodeSet");
+async function handlePowerlevelTestNodeGet(driver2, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  const status = driver2.getNOPPowerTestStatus();
+  if (status) {
+    await api.sendNodeTestReport({
+      status: status.inProgress ? PowerlevelTestStatus["In Progress"] : status.acknowledgedFrames > 0 ? PowerlevelTestStatus.Success : PowerlevelTestStatus.Failed,
+      ...status
+    });
+  } else {
+    await api.sendNodeTestReport({
+      status: PowerlevelTestStatus.Success,
+      testNodeId: 0,
+      acknowledgedFrames: 0
+    });
+  }
+}
+__name(handlePowerlevelTestNodeGet, "handlePowerlevelTestNodeGet");
+function handlePowerlevelTestNodeReport(ctx, node, command) {
+  node.emit("notification", node, CommandClasses.Powerlevel, pick(command, ["testNodeId", "status", "acknowledgedFrames"]));
+}
+__name(handlePowerlevelTestNodeReport, "handlePowerlevelTestNodeReport");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/ThermostatModeCC.js
+function handleThermostatModeCommand(ctx, node, command) {
+  if (command instanceof ThermostatModeCCSet && node.deviceConfig?.compat?.treatSetAsReport?.has(command.constructor.name)) {
+    ctx.logNode(node.id, {
+      endpoint: command.endpointIndex,
+      message: "treating ThermostatModeCC::Set as a report"
+    });
+    node.valueDB.setValue(ThermostatModeCCValues.thermostatMode.endpoint(command.endpointIndex), command.mode);
+  }
+}
+__name(handleThermostatModeCommand, "handleThermostatModeCommand");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/TimeCC.js
+async function handleTimeGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const now = /* @__PURE__ */ new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+  try {
+    const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
+      // Answer with the same encapsulation as asked, but omit
+      // Supervision as it shouldn't be used for Get-Report flows
+      encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+    });
+    await api.reportTime(hours, minutes, seconds);
+  } catch (e) {
+    ctx.logNode(node.id, {
+      message: e.message,
+      level: "error"
+    });
+  }
+}
+__name(handleTimeGet, "handleTimeGet");
+async function handleDateGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const now = /* @__PURE__ */ new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const day = now.getDate();
+  try {
+    const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
+      // Answer with the same encapsulation as asked, but omit
+      // Supervision as it shouldn't be used for Get-Report flows
+      encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+    });
+    await api.reportDate(year, month, day);
+  } catch (e) {
+    ctx.logNode(node.id, {
+      message: e.message,
+      level: "error"
+    });
+  }
+}
+__name(handleDateGet, "handleDateGet");
+async function handleTimeOffsetGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const timezone = getDSTInfo(/* @__PURE__ */ new Date());
+  try {
+    const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
+      // Answer with the same encapsulation as asked, but omit
+      // Supervision as it shouldn't be used for Get-Report flows
+      encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+    });
+    await api.reportTimezone(timezone);
+  } catch {
+  }
+}
+__name(handleTimeOffsetGet, "handleTimeOffsetGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/VersionCC.js
 var import_parse2 = __toESM(require_parse(), 1);
+
+// ../zwave-js/build/esm/lib/_version.js
+var PACKAGE_VERSION2 = "15.0.0";
+var PACKAGE_NAME = "zwave-js";
 
 // ../zwave-js/build/esm/lib/controller/NodeInformationFrame.js
 function determineNIF() {
@@ -107066,10 +108067,6 @@ function determineNIF() {
   };
 }
 __name(determineNIF, "determineNIF");
-
-// ../zwave-js/build/esm/lib/_version.js
-var PACKAGE_VERSION2 = "15.0.0-beta.1";
-var PACKAGE_NAME = "zwave-js";
 
 // ../zwave-js/build/esm/lib/log/Driver.js
 var DRIVER_LABEL = "DRIVER";
@@ -109783,6 +110780,7 @@ var Driver = class extends TypedEventTarget {
         return { type: "requeue" };
       });
     }
+    this.debounceSendNodeToSleep(node);
   }
   /** Is called when a node goes to sleep */
   onNodeSleep(node, oldStatus) {
@@ -110654,7 +111652,10 @@ var Driver = class extends TypedEventTarget {
       let wasMessageLogged = false;
       if (isCommandRequest(msg) && containsCC(msg)) {
         if (msg.command instanceof SecurityCCCommandEncapsulationNonceGet) {
-          void this.tryGetNode(msg)?.handleSecurityNonceGet();
+          const node = this.tryGetNode(msg);
+          if (node) {
+            void this.handleSecurityNonceGet(node);
+          }
         }
         if (isTransportServiceEncapsulation(msg.command)) {
           this.driverLog.logMessage(msg, {
@@ -111472,6 +112473,24 @@ ${handlers.length} left`);
       }
       const node = this.controller.nodes.get(nodeId);
       const nodeSessions = this.nodeSessions.get(nodeId);
+      if (msg.command instanceof SecurityCCNonceGet) {
+        return this.handleSecurityNonceGet(node);
+      }
+      if (msg.command instanceof SecurityCCNonceReport) {
+        return this.handleSecurityNonceReport(node, msg.command);
+      }
+      if (msg.command instanceof SecurityCCCommandsSupportedGet) {
+        return this.handleSecurityCommandsSupportedGet(node, msg.command);
+      }
+      if (msg.command instanceof Security2CCNonceGet) {
+        return this.handleSecurity2NonceGet(node);
+      }
+      if (msg.command instanceof Security2CCNonceReport) {
+        return this.handleSecurity2NonceReport(node, msg.command);
+      }
+      if (msg.command instanceof Security2CCCommandsSupportedGet) {
+        return this.handleSecurity2CommandsSupportedGet(node, msg.command);
+      }
       if (msg.command.ccId === CommandClasses.Supervision && msg.command instanceof SupervisionCCReport && nodeSessions?.supervision.has(msg.command.sessionId)) {
         this.controllerLog.logNode(msg.command.nodeId, {
           message: `Received update for a Supervision session`,
@@ -111484,37 +112503,28 @@ ${handlers.length} left`);
         if (!msg.command.moreUpdatesFollow) {
           nodeSessions.supervision.delete(msg.command.sessionId);
         }
+        return;
+      }
+      const supervisionSessionId = SupervisionCC.getSessionId(msg.command);
+      const s2MulticastOutOfSync = this.mustReplyWithSecurityS2MOS(msg);
+      const encapsulationFlags = msg.command.encapsulationFlags;
+      let reply;
+      if (supervisionSessionId != void 0) {
+        const endpoint = node.getEndpoint(msg.command.endpointIndex) ?? node;
+        reply = /* @__PURE__ */ __name((status) => endpoint.createAPI(CommandClasses.Supervision, false).withOptions({ s2MulticastOutOfSync }).sendReport({
+          sessionId: supervisionSessionId,
+          moreUpdatesFollow: false,
+          status,
+          requestWakeUpOnDemand: this.shouldRequestWakeupOnDemand(node),
+          encapsulationFlags,
+          lowPriority: this.shouldUseLowPriorityForSupervisionReport(node, encapsulationFlags)
+        }), "reply");
       } else {
-        const supervisionSessionId = SupervisionCC.getSessionId(msg.command);
-        const s2MulticastOutOfSync = this.mustReplyWithSecurityS2MOS(msg);
-        const encapsulationFlags = msg.command.encapsulationFlags;
-        let reply;
-        if (supervisionSessionId != void 0) {
-          const endpoint = node.getEndpoint(msg.command.endpointIndex) ?? node;
-          reply = /* @__PURE__ */ __name((status) => endpoint.createAPI(CommandClasses.Supervision, false).withOptions({ s2MulticastOutOfSync }).sendReport({
-            sessionId: supervisionSessionId,
-            moreUpdatesFollow: false,
-            status,
-            requestWakeUpOnDemand: this.shouldRequestWakeupOnDemand(node),
-            encapsulationFlags,
-            lowPriority: this.shouldUseLowPriorityForSupervisionReport(node, encapsulationFlags)
-          }), "reply");
-        } else {
-          reply = /* @__PURE__ */ __name(() => Promise.resolve(), "reply");
-        }
-        if (supervisionSessionId == void 0 && s2MulticastOutOfSync) {
-          node.commandClasses["Security 2"].sendMOS().catch(() => {
-          });
-        }
-        for (const entry of this.awaitedCommands) {
-          if (entry.predicate(msg.command)) {
-            entry.handler(msg.command);
-            await reply(SupervisionStatus.Success);
-            return;
-          }
-        }
+        reply = /* @__PURE__ */ __name(() => Promise.resolve(), "reply");
+      }
+      const trySupervised = /* @__PURE__ */ __name(async (action) => {
         try {
-          await node.handleCommand(msg.command);
+          await action();
           await reply(SupervisionStatus.Success);
         } catch (e) {
           let handled = false;
@@ -111532,7 +112542,32 @@ ${handlers.length} left`);
             throw e;
           }
         }
+      }, "trySupervised");
+      if (supervisionSessionId == void 0 && s2MulticastOutOfSync) {
+        node.commandClasses["Security 2"].sendMOS().catch(() => {
+        });
       }
+      for (const entry of this.awaitedCommands) {
+        if (entry.predicate(msg.command)) {
+          entry.handler(msg.command);
+          await reply(SupervisionStatus.Success);
+          return;
+        }
+      }
+      if (msg.command instanceof Security2CCMessageEncapsulation && msg.command.encapsulated == void 0) {
+        await reply(SupervisionStatus.Success);
+        return;
+      }
+      if (msg.command instanceof InclusionControllerCCInitiate) {
+        const command = msg.command;
+        if (msg.command.step === InclusionControllerStep.ProxyInclusion) {
+          await trySupervised(() => this.controller.handleInclusionControllerCCInitiateProxyInclusion(command));
+          return;
+        } else if (msg.command.step === InclusionControllerStep.ProxyInclusionReplace) {
+          await trySupervised(() => this.controller.handleInclusionControllerCCInitiateReplace(command));
+        }
+      }
+      await trySupervised(() => node.handleCommand(msg.command));
       return;
     } else if (msg instanceof ApplicationUpdateRequest) {
       this.ensureReady(true);
@@ -111565,6 +112600,172 @@ ${handlers.length} left`);
       }
     } else {
       this.driverLog.print("  no handlers registered!", "warn");
+    }
+  }
+  hasLoggedNoNetworkKey = false;
+  async handleSecurityNonceGet(node) {
+    if (!this.securityManager) {
+      if (!this.hasLoggedNoNetworkKey) {
+        this.hasLoggedNoNetworkKey = true;
+        this.controllerLog.logNode(node.id, {
+          message: `cannot reply to NonceGet because no network key was configured!`,
+          direction: "inbound",
+          level: "warn"
+        });
+      }
+      return;
+    }
+    node.addCC(CommandClasses.Security, {
+      isSupported: true,
+      version: 1,
+      // Security CC is always secure
+      secure: true
+    });
+    const isNonceReport = /* @__PURE__ */ __name((t) => t.message.getNodeId() === node.id && containsCC(t.message) && t.message.command instanceof SecurityCCNonceReport, "isNonceReport");
+    if (this.hasPendingTransactions(isNonceReport)) {
+      this.controllerLog.logNode(node.id, {
+        message: "in the process of replying to a NonceGet, won't send another NonceReport",
+        level: "warn"
+      });
+      return;
+    }
+    this.securityManager.deleteAllNoncesForReceiver(node.id);
+    try {
+      await node.commandClasses.Security.sendNonce();
+    } catch (e) {
+      this.controllerLog.logNode(node.id, {
+        message: `failed to send nonce: ${getErrorMessage(e)}`,
+        direction: "inbound"
+      });
+    }
+  }
+  /**
+   * Is called when a nonce report is received that does not belong to any transaction.
+   * The received nonce reports are stored as "free" nonces
+   */
+  handleSecurityNonceReport(node, command) {
+    const secMan = this.securityManager;
+    if (!secMan)
+      return;
+    secMan.setNonce({
+      issuer: node.id,
+      nonceId: secMan.getNonceId(command.nonce)
+    }, {
+      nonce: command.nonce,
+      receiver: this.controller.ownNodeId
+    }, { free: true });
+  }
+  async handleSecurityCommandsSupportedGet(node, command) {
+    const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+    if (this.getHighestSecurityClass(node.id) === SecurityClass.S0_Legacy) {
+      const { supportedCCs } = determineNIF();
+      await endpoint.commandClasses.Security.reportSupportedCommands(
+        supportedCCs,
+        // We don't report controlled CCs
+        []
+      );
+    } else {
+      await endpoint.commandClasses.Security.reportSupportedCommands([], []);
+    }
+  }
+  /** Handles a nonce request for S2 */
+  async handleSecurity2NonceGet(node) {
+    if (!this.getSecurityManager2(node.id)) {
+      if (!this.hasLoggedNoNetworkKey) {
+        this.hasLoggedNoNetworkKey = true;
+        this.controllerLog.logNode(node.id, {
+          message: `cannot reply to NonceGet (S2) because no network key was configured!`,
+          direction: "inbound",
+          level: "warn"
+        });
+      }
+      return;
+    }
+    node.addCC(CommandClasses["Security 2"], {
+      isSupported: true,
+      version: 1,
+      // Security 2 CC is always secure
+      secure: true
+    });
+    const isNonceReport = /* @__PURE__ */ __name((t) => t.message.getNodeId() === node.id && containsCC(t.message) && t.message.command instanceof Security2CCNonceReport, "isNonceReport");
+    if (this.hasPendingTransactions(isNonceReport)) {
+      this.controllerLog.logNode(node.id, {
+        message: "in the process of replying to a NonceGet, won't send another NonceReport",
+        level: "warn"
+      });
+      return;
+    }
+    try {
+      await node.commandClasses["Security 2"].sendNonce();
+    } catch (e) {
+      this.controllerLog.logNode(node.id, {
+        message: `failed to send nonce: ${getErrorMessage(e)}`,
+        direction: "inbound"
+      });
+    }
+  }
+  /**
+   * Is called when a nonce report is received that does not belong to any transaction.
+   */
+  handleSecurity2NonceReport(node, _command) {
+    this.controllerLog.logNode(node.id, {
+      message: `received S2 nonce without an active transaction, not sure what to do with it`,
+      level: "warn",
+      direction: "inbound"
+    });
+  }
+  async handleSecurity2CommandsSupportedGet(node, command) {
+    const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+    const highestSecurityClass = this.getHighestSecurityClass(node.id);
+    const actualSecurityClass = command.getEncapsulatingCC(CommandClasses["Security 2"], Security2Command.MessageEncapsulation)?.securityClass;
+    if (highestSecurityClass !== void 0 && highestSecurityClass === actualSecurityClass) {
+      const implementedCCs = allCCs.filter((cc) => getImplementedVersion(cc) > 0);
+      const implementedEncapsulationCCs = encapsulationCCs.filter((cc) => implementedCCs.includes(cc) && cc !== CommandClasses["Multi Channel"]);
+      const supportedCCs = /* @__PURE__ */ new Set([
+        // DT:00.11.0004.1
+        // All Root Devices or nodes MUST support:
+        // - Association, version 2
+        // - Association Group Information
+        // - Device Reset Locally
+        // - Firmware Update Meta Data, version 5
+        // - Indicator, version 3
+        // - Manufacturer Specific
+        // - Multi Channel Association, version 3
+        // - Powerlevel
+        // - Security 2
+        // - Supervision
+        // - Transport Service, version 2
+        // - Version, version 2
+        // - Z-Wave Plus Info, version 2
+        CommandClasses.Association,
+        CommandClasses["Association Group Information"],
+        CommandClasses["Device Reset Locally"],
+        CommandClasses["Firmware Update Meta Data"],
+        CommandClasses.Indicator,
+        CommandClasses["Manufacturer Specific"],
+        CommandClasses["Multi Channel Association"],
+        CommandClasses.Powerlevel,
+        CommandClasses.Version,
+        CommandClasses["Z-Wave Plus Info"],
+        // Generic Controller device type has no additional support requirements,
+        // but we also support the following command classes:
+        CommandClasses["Inclusion Controller"],
+        // plus encapsulation CCs, which are part of the above requirement
+        ...implementedEncapsulationCCs.filter((cc) => (
+          // CC:009F.01.0E.11.00F
+          // The Security 0 and Security 2 Command Class MUST NOT be advertised in this command
+          // The Transport Service Command Class MUST NOT be advertised in this command.
+          cc !== CommandClasses.Security && cc !== CommandClasses["Security 2"] && cc !== CommandClasses["Transport Service"]
+        ))
+      ]);
+      const commandsInNIF = new Set(determineNIF().supportedCCs);
+      const supportedCommandsNotInNIF = [...supportedCCs].filter((cc) => !commandsInNIF.has(cc));
+      await endpoint.commandClasses["Security 2"].reportSupportedCommands(supportedCommandsNotInNIF);
+    } else if (securityClassIsS2(actualSecurityClass)) {
+      await endpoint.commandClasses["Security 2"].withOptions({
+        s2OverrideSecurityClass: actualSecurityClass
+      }).reportSupportedCommands([]);
+    } else {
     }
   }
   /**
@@ -113316,6 +114517,180 @@ ${handlers.length} left`);
   }
 };
 
+// ../zwave-js/build/esm/lib/node/CCHandlers/VersionCC.js
+async function handleVersionGet(ctx, controller, node, command, vendorInfo) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  const firmwareVersion1 = (0, import_parse2.default)(libVersion, { loose: true });
+  await api.sendReport({
+    libraryType: ZWaveLibraryTypes["Static Controller"],
+    protocolVersion: controller.protocolVersion,
+    firmwareVersions: [
+      // Firmware 0 is the Z-Wave chip firmware
+      controller.firmwareVersion,
+      // Firmware 1 is Z-Wave JS itself
+      `${firmwareVersion1.major}.${firmwareVersion1.minor}.${firmwareVersion1.patch}`
+    ],
+    hardwareVersion: vendorInfo?.hardwareVersion
+  });
+}
+__name(handleVersionGet, "handleVersionGet");
+async function handleVersionCommandClassGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportCCVersion(command.requestedCC);
+}
+__name(handleVersionCommandClassGet, "handleVersionCommandClassGet");
+async function handleVersionCapabilitiesGet(ctx, node, command) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  });
+  await api.reportCapabilities();
+}
+__name(handleVersionCapabilitiesGet, "handleVersionCapabilitiesGet");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/WakeUpCC.js
+function getDefaultWakeUpHandlerStore() {
+  return {
+    lastWakeUp: void 0
+  };
+}
+__name(getDefaultWakeUpHandlerStore, "getDefaultWakeUpHandlerStore");
+function handleWakeUpNotification(ctx, node, _command, store) {
+  ctx.logNode(node.id, {
+    message: `received wakeup notification`,
+    direction: "inbound"
+  });
+  if (node.getCCVersion(CommandClasses["Wake Up"]) === 0) {
+    node.addCC(CommandClasses["Wake Up"], {
+      isSupported: true,
+      version: 1
+    });
+  }
+  node.markAsAwake();
+  const now = Date.now();
+  if (store.lastWakeUp) {
+    const wakeUpInterval = node.getValue(WakeUpCCValues.wakeUpInterval.id) ?? 1;
+    if (wakeUpInterval > 0 && (now - store.lastWakeUp) / 1e3 > wakeUpInterval + 5 * 60) {
+      node.commandClasses["Wake Up"].getInterval().catch(() => {
+      });
+    }
+  }
+  store.lastWakeUp = now;
+  if (node.deviceConfig?.compat?.queryOnWakeup) {
+    void compatDoWakeupQueries(ctx, node);
+  } else if (!node.deviceConfig?.compat?.disableAutoRefresh) {
+    void node.autoRefreshValues().catch(() => {
+    });
+  }
+}
+__name(handleWakeUpNotification, "handleWakeUpNotification");
+async function compatDoWakeupQueries(ctx, node) {
+  if (!node.deviceConfig?.compat?.queryOnWakeup)
+    return;
+  ctx.logNode(node.id, {
+    message: `expects some queries after wake up, so it shall receive`,
+    direction: "none"
+  });
+  for (const [ccName, apiMethod, ...args] of node.deviceConfig.compat.queryOnWakeup) {
+    ctx.logNode(node.id, {
+      message: `compat query "${ccName}"::${apiMethod}(${args.map((arg) => JSON.stringify(arg)).join(", ")})`,
+      direction: "none"
+    });
+    let API2;
+    try {
+      API2 = node.commandClasses[ccName].withOptions({
+        // Tag the resulting transactions as compat queries
+        tag: "compat",
+        // Do not retry them or they may cause congestion if the node is asleep again
+        maxSendAttempts: 1,
+        // This is for a sleeping node - there's no point in keeping the transactions when the node is asleep
+        expire: 1e4
+      });
+    } catch {
+      ctx.logNode(node.id, {
+        message: `could not access API, skipping query`,
+        direction: "none",
+        level: "warn"
+      });
+      continue;
+    }
+    if (!API2.isSupported()) {
+      ctx.logNode(node.id, {
+        message: `API not supported, skipping query`,
+        direction: "none",
+        level: "warn"
+      });
+      continue;
+    } else if (!API2[apiMethod]) {
+      ctx.logNode(node.id, {
+        message: `method ${apiMethod} not found on API, skipping query`,
+        direction: "none",
+        level: "warn"
+      });
+      continue;
+    }
+    const method = API2[apiMethod].bind(API2);
+    const methodArgs = args.map((arg) => {
+      if (isObject(arg)) {
+        const valueId = {
+          commandClass: API2.ccId,
+          ...arg
+        };
+        return node.getValue(valueId);
+      }
+      return arg;
+    });
+    try {
+      await method(...methodArgs);
+      ctx.logNode(node.id, {
+        message: `API call successful`,
+        direction: "none"
+      });
+    } catch (e) {
+      ctx.logNode(node.id, {
+        message: `error during API call: ${getErrorMessage(e)}`,
+        direction: "none",
+        level: "warn"
+      });
+      if (isZWaveError(e) && e.code === ZWaveErrorCodes.Controller_MessageExpired) {
+        return;
+      }
+    }
+  }
+}
+__name(compatDoWakeupQueries, "compatDoWakeupQueries");
+
+// ../zwave-js/build/esm/lib/node/CCHandlers/ZWavePlusCC.js
+async function handleZWavePlusGet(ctx, node, command, vendorInfo) {
+  const endpoint = node.getEndpoint(command.endpointIndex) ?? node;
+  await endpoint.createAPI(CommandClasses["Z-Wave Plus Info"], false).withOptions({
+    // Answer with the same encapsulation as asked, but omit
+    // Supervision as it shouldn't be used for Get-Report flows
+    encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
+  }).sendReport({
+    zwavePlusVersion: 2,
+    roleType: ZWavePlusRoleType.CentralStaticController,
+    nodeType: ZWavePlusNodeType.Node,
+    installerIcon: vendorInfo?.installerIcon ?? 1280,
+    // Generic Gateway
+    userIcon: vendorInfo?.userIcon ?? 1280
+    // Generic Gateway
+  });
+}
+__name(handleZWavePlusGet, "handleZWavePlusGet");
+
 // ../zwave-js/build/esm/lib/node/HealthCheck.js
 var healthCheckTestFrameCount = 10;
 function healthCheckRatingToWord(rating) {
@@ -113883,6 +115258,58 @@ function getDefinedValueIDsInternal(ctx, node, includeInternal = false) {
   return ret.map((id) => translateValueID(ctx, node, id));
 }
 __name(getDefinedValueIDsInternal, "getDefinedValueIDsInternal");
+function getSupportedNotificationEvents(ctx, node) {
+  const ret = [];
+  const valueDB = ctx.getValueDB(node.id);
+  for (const endpoint of getAllEndpoints(ctx, node)) {
+    if (endpoint.supportsCC(CommandClasses["Entry Control"])) {
+      const eventTypes = valueDB.getValue(EntryControlCCValues.supportedEventTypes.endpoint(endpoint.index));
+      const dataTypes = valueDB.getValue(EntryControlCCValues.supportedDataTypes.endpoint(endpoint.index));
+      if (eventTypes && dataTypes) {
+        const capability = {
+          commandClass: CommandClasses["Entry Control"],
+          endpoint: endpoint.index,
+          supportedEventTypes: Object.fromEntries(eventTypes.map((et2) => [
+            et2,
+            entryControlEventTypeLabels[et2]
+          ])),
+          supportedDataTypes: Object.fromEntries(dataTypes.map((dt) => [
+            dt,
+            getEnumMemberName(EntryControlDataTypes, dt)
+          ]))
+        };
+        ret.push(capability);
+      }
+    }
+    if (endpoint.supportsCC(CommandClasses.Notification)) {
+      const notificationTypes = valueDB.getValue(NotificationCCValues.supportedNotificationTypes.endpoint(endpoint.index)) ?? [];
+      const capability = {
+        commandClass: CommandClasses.Notification,
+        endpoint: endpoint.index,
+        supportedNotificationTypes: {}
+      };
+      let hasEvent = false;
+      for (const notificationType of notificationTypes) {
+        const notification = getNotification(notificationType);
+        if (!notification)
+          continue;
+        const notificationEvents = valueDB.getValue(NotificationCCValues.supportedNotificationEvents(notificationType).endpoint(endpoint.index))?.map((e) => notification.events.get(e)).filter((e) => e != void 0);
+        if (!notificationEvents || notificationEvents.length === 0) {
+          continue;
+        }
+        capability.supportedNotificationTypes[notificationType] = {
+          label: notification.name,
+          supportedEvents: Object.fromEntries(notificationEvents.map((e) => [e.value, e.label]))
+        };
+        hasEvent = true;
+      }
+      if (hasEvent)
+        ret.push(capability);
+    }
+  }
+  return ret;
+}
+__name(getSupportedNotificationEvents, "getSupportedNotificationEvents");
 
 // ../zwave-js/build/esm/lib/node/NodeReadyMachine.js
 function to3(state) {
@@ -114441,8 +115868,59 @@ var NodeValuesMixin = class extends NodeWakeupMixin {
   }
 };
 
+// ../zwave-js/build/esm/lib/node/mixins/41_CapabilityValues.js
+var NodeCapabilityValuesMixin = class extends NodeValuesMixin {
+  static {
+    __name(this, "NodeCapabilityValuesMixin");
+  }
+  get manufacturerId() {
+    return this.getValue(ManufacturerSpecificCCValues.manufacturerId.id);
+  }
+  get productId() {
+    return this.getValue(ManufacturerSpecificCCValues.productId.id);
+  }
+  get productType() {
+    return this.getValue(ManufacturerSpecificCCValues.productType.id);
+  }
+  get firmwareVersion() {
+    const firmware0Version = this.getValue(VersionCCValues.firmwareVersions.id)?.[0];
+    const applicationVersion = this.getValue(VersionCCValues.applicationVersion.id);
+    let ret = firmware0Version;
+    if (applicationVersion) {
+      if (!ret || applicationVersion.startsWith(`${ret}.`)) {
+        ret = applicationVersion;
+      }
+    }
+    if (ret && this.isControllerNode) {
+      const sdkVersion = this.sdkVersion;
+      if (sdkVersion && sdkVersion.startsWith(`${ret}.`)) {
+        return sdkVersion;
+      }
+    }
+    return ret;
+  }
+  get hardwareVersion() {
+    return this.getValue(VersionCCValues.hardwareVersion.id);
+  }
+  get sdkVersion() {
+    return this.getValue(VersionCCValues.sdkVersion.id);
+  }
+  get zwavePlusVersion() {
+    return this.getValue(ZWavePlusCCValues.zwavePlusVersion.id);
+  }
+  get zwavePlusNodeType() {
+    return this.getValue(ZWavePlusCCValues.nodeType.id);
+  }
+  get zwavePlusRoleType() {
+    return this.getValue(ZWavePlusCCValues.roleType.id);
+  }
+  get supportsWakeUpOnDemand() {
+    return this.getValue(WakeUpCCValues.wakeUpOnDemandSupported.id);
+  }
+};
+
 // ../zwave-js/build/esm/lib/node/mixins/50_Endpoints.js
-var EndpointsMixin = class extends NodeValuesMixin {
+var EndpointsMixin = class extends NodeCapabilityValuesMixin {
   static {
     __name(this, "EndpointsMixin");
   }
@@ -114601,6 +116079,46 @@ __name(isFirmwareUpdateOTATask, "isFirmwareUpdateOTATask");
 var FirmwareUpdateMixin = class extends SchedulePollMixin {
   static {
     __name(this, "FirmwareUpdateMixin");
+  }
+  async getFirmwareUpdateCapabilities() {
+    const api = this.commandClasses["Firmware Update Meta Data"];
+    const meta = await api.getMetaData();
+    if (!meta) {
+      throw new ZWaveError(`Failed to request firmware update capabilities: The node did not respond in time!`, ZWaveErrorCodes.Controller_NodeTimeout);
+    } else if (!meta.firmwareUpgradable) {
+      return {
+        firmwareUpgradable: false
+      };
+    }
+    return {
+      firmwareUpgradable: true,
+      // TODO: Targets are not the list of IDs - maybe expose the IDs as well?
+      firmwareTargets: new Array(1 + meta.additionalFirmwareIDs.length).fill(0).map((_, i) => i),
+      continuesToFunction: meta.continuesToFunction,
+      supportsActivation: meta.supportsActivation,
+      supportsResuming: meta.supportsResuming,
+      supportsNonSecureTransfer: meta.supportsNonSecureTransfer
+    };
+  }
+  getFirmwareUpdateCapabilitiesCached() {
+    const firmwareUpgradable = this.getValue(FirmwareUpdateMetaDataCCValues.firmwareUpgradable.id);
+    const supportsActivation = this.getValue(FirmwareUpdateMetaDataCCValues.supportsActivation.id);
+    const continuesToFunction = this.getValue(FirmwareUpdateMetaDataCCValues.continuesToFunction.id);
+    const additionalFirmwareIDs = this.getValue(FirmwareUpdateMetaDataCCValues.additionalFirmwareIDs.id);
+    const supportsResuming = this.getValue(FirmwareUpdateMetaDataCCValues.supportsResuming.id);
+    const supportsNonSecureTransfer = this.getValue(FirmwareUpdateMetaDataCCValues.supportsNonSecureTransfer.id);
+    if (!firmwareUpgradable || !isArray(additionalFirmwareIDs)) {
+      return { firmwareUpgradable: false };
+    }
+    return {
+      firmwareUpgradable: true,
+      // TODO: Targets are not the list of IDs - maybe expose the IDs as well?
+      firmwareTargets: new Array(1 + additionalFirmwareIDs.length).fill(0).map((_, i) => i),
+      continuesToFunction,
+      supportsActivation,
+      supportsResuming,
+      supportsNonSecureTransfer
+    };
   }
   _abortFirmwareUpdate;
   async abortFirmwareUpdate() {
@@ -115076,8 +116594,107 @@ var FirmwareUpdateMixin = class extends SchedulePollMixin {
   }
 };
 
+// ../zwave-js/build/esm/lib/node/mixins/80_DeviceConfig.js
+var DeviceConfigMixin = class extends FirmwareUpdateMixin {
+  static {
+    __name(this, "DeviceConfigMixin");
+  }
+  _deviceConfig;
+  /**
+   * Contains additional information about this node, loaded from a config file
+   */
+  get deviceConfig() {
+    return this._deviceConfig;
+  }
+  set deviceConfig(value) {
+    this._deviceConfig = value;
+  }
+  /**
+   * Returns the manufacturer/brand name defined in the device configuration,
+   * or looks it up from the manufacturer database if no config is available
+   */
+  get manufacturer() {
+    if (this._deviceConfig)
+      return this._deviceConfig.manufacturer;
+    if (this.manufacturerId != void 0) {
+      return this.driver.lookupManufacturer(this.manufacturerId);
+    }
+  }
+  /**
+   * Returns the device label defined in the device configuration.
+   */
+  get label() {
+    return this._deviceConfig?.label;
+  }
+  get deviceDatabaseUrl() {
+    if (this.manufacturerId != void 0 && this.productType != void 0 && this.productId != void 0) {
+      const manufacturerId2 = formatId(this.manufacturerId);
+      const productType = formatId(this.productType);
+      const productId = formatId(this.productId);
+      const firmwareVersion = this.firmwareVersion || "0.0";
+      return `https://devices.zwave-js.io/?jumpTo=${manufacturerId2}:${productType}:${productId}:${firmwareVersion}`;
+    }
+  }
+  /**
+   * Returns whether the device config for this node has changed since the last interview.
+   * If it has, the node likely needs to be re-interviewed for the changes to be picked up.
+   */
+  hasDeviceConfigChanged() {
+    if (this.interviewStage !== InterviewStage.Complete)
+      return NOT_KNOWN;
+    if (this.isControllerNode)
+      return false;
+    if (this.cachedDeviceConfigHash == void 0) {
+      return this.deviceConfig == void 0 ? false : NOT_KNOWN;
+    }
+    if (this._currentDeviceConfigHash) {
+      return !Bytes.view(this._currentDeviceConfigHash).equals(this.cachedDeviceConfigHash);
+    }
+    return true;
+  }
+  /**
+   * @internal
+   * The hash of the device config that was applied during the last interview.
+   */
+  get cachedDeviceConfigHash() {
+    return this.driver.cacheGet(cacheKeys.node(this.id).deviceConfigHash);
+  }
+  set cachedDeviceConfigHash(value) {
+    this.driver.cacheSet(cacheKeys.node(this.id).deviceConfigHash, value);
+  }
+  _currentDeviceConfigHash;
+  /**
+   * @internal
+   * The hash of the currently used device config
+   */
+  get currentDeviceConfigHash() {
+    return this._currentDeviceConfigHash;
+  }
+  set currentDeviceConfigHash(value) {
+    this._currentDeviceConfigHash = value;
+  }
+  /**
+   * Loads the device configuration for this node from a config file
+   */
+  async loadDeviceConfig() {
+    if (this.manufacturerId != void 0 && this.productType != void 0 && this.productId != void 0) {
+      this.deviceConfig = await this.driver.configManager.lookupDevice(this.manufacturerId, this.productType, this.productId, this.firmwareVersion);
+      if (this.deviceConfig) {
+        if (this.cachedDeviceConfigHash?.length === 16) {
+          this._currentDeviceConfigHash = await this.deviceConfig.getHash("md5");
+        } else {
+          this._currentDeviceConfigHash = await this.deviceConfig.getHash();
+        }
+        this.driver.controllerLog.logNode(this.id, `${this.deviceConfig.isEmbedded ? "Embedded" : "User-provided"} device config loaded`);
+      } else {
+        this.driver.controllerLog.logNode(this.id, "No device config found", "warn");
+      }
+    }
+  }
+};
+
 // ../zwave-js/build/esm/lib/node/mixins/index.js
-var ZWaveNodeMixins = class extends FirmwareUpdateMixin {
+var ZWaveNodeMixins = class extends DeviceConfigMixin {
   static {
     __name(this, "ZWaveNodeMixins");
   }
@@ -115124,7 +116741,6 @@ var __runInitializers133 = function(thisArg, initializers, value) {
   }
   return useValue ? value : void 0;
 };
-var MAX_ASSOCIATIONS = 1;
 var ZWaveNode = (() => {
   let _classDecorators = [Mixin([TypedEventTarget, NodeStatisticsHost])];
   let _classDescriptor;
@@ -115163,8 +116779,8 @@ var ZWaveNode = (() => {
      */
     destroy() {
       for (const timeout2 of [
-        this.centralSceneKeyHeldDownContext?.timeout,
-        ...this.notificationIdleTimeouts.values()
+        this.centralSceneHandlerStore.keyHeldDownContext?.timeout,
+        ...this.notificationHandlerStore.idleTimeouts.values()
       ]) {
         timeout2?.clear();
       }
@@ -115182,50 +116798,6 @@ var ZWaveNode = (() => {
     set dsk(value) {
       const cacheKey = cacheKeys.node(this.id).dsk;
       this.driver.cacheSet(cacheKey, value);
-    }
-    get manufacturerId() {
-      return this.getValue(ManufacturerSpecificCCValues.manufacturerId.id);
-    }
-    get productId() {
-      return this.getValue(ManufacturerSpecificCCValues.productId.id);
-    }
-    get productType() {
-      return this.getValue(ManufacturerSpecificCCValues.productType.id);
-    }
-    get firmwareVersion() {
-      const firmware0Version = this.getValue(VersionCCValues.firmwareVersions.id)?.[0];
-      const applicationVersion = this.getValue(VersionCCValues.applicationVersion.id);
-      let ret = firmware0Version;
-      if (applicationVersion) {
-        if (!ret || applicationVersion.startsWith(`${ret}.`)) {
-          ret = applicationVersion;
-        }
-      }
-      if (ret && this.isControllerNode) {
-        const sdkVersion = this.sdkVersion;
-        if (sdkVersion && sdkVersion.startsWith(`${ret}.`)) {
-          return sdkVersion;
-        }
-      }
-      return ret;
-    }
-    get hardwareVersion() {
-      return this.getValue(VersionCCValues.hardwareVersion.id);
-    }
-    get sdkVersion() {
-      return this.getValue(VersionCCValues.sdkVersion.id);
-    }
-    get zwavePlusVersion() {
-      return this.getValue(ZWavePlusCCValues.zwavePlusVersion.id);
-    }
-    get zwavePlusNodeType() {
-      return this.getValue(ZWavePlusCCValues.nodeType.id);
-    }
-    get zwavePlusRoleType() {
-      return this.getValue(ZWavePlusCCValues.roleType.id);
-    }
-    get supportsWakeUpOnDemand() {
-      return this.getValue(WakeUpCCValues.wakeUpOnDemandSupported.id);
     }
     /**
      * The user-defined name of this node. Uses the value reported by `Node Naming and Location CC` if it exists.
@@ -115266,25 +116838,6 @@ var ZWaveNode = (() => {
     set hasSUCReturnRoute(value) {
       this.driver.cacheSet(cacheKeys.node(this.id).hasSUCReturnRoute, value);
     }
-    _deviceConfig;
-    /**
-     * Contains additional information about this node, loaded from a config file
-     */
-    get deviceConfig() {
-      return this._deviceConfig;
-    }
-    get label() {
-      return this._deviceConfig?.label;
-    }
-    get deviceDatabaseUrl() {
-      if (this.manufacturerId != void 0 && this.productType != void 0 && this.productId != void 0) {
-        const manufacturerId2 = formatId(this.manufacturerId);
-        const productType = formatId(this.productType);
-        const productId = formatId(this.productId);
-        const firmwareVersion = this.firmwareVersion || "0.0";
-        return `https://devices.zwave-js.io/?jumpTo=${manufacturerId2}:${productType}:${productId}:${firmwareVersion}`;
-      }
-    }
     /** The last time a message was received from this node */
     get lastSeen() {
       return this.driver.cacheGet(cacheKeys.node(this.id).lastSeen);
@@ -115323,24 +116876,6 @@ var ZWaveNode = (() => {
       if (Duration.isDuration(value))
         value = value.toString();
       this.driver.cacheSet(cacheKeys.node(this.id).defaultTransitionDuration, value);
-    }
-    /**
-     * @internal
-     * The hash of the device config that was applied during the last interview.
-     */
-    get cachedDeviceConfigHash() {
-      return this.driver.cacheGet(cacheKeys.node(this.id).deviceConfigHash);
-    }
-    set cachedDeviceConfigHash(value) {
-      this.driver.cacheSet(cacheKeys.node(this.id).deviceConfigHash, value);
-    }
-    _currentDeviceConfigHash;
-    /**
-     * @internal
-     * The hash of the currently used device config
-     */
-    get currentDeviceConfigHash() {
-      return this._currentDeviceConfigHash;
     }
     /** Returns a list of all value names that are defined on all endpoints of this node */
     getDefinedValueIDs() {
@@ -115523,6 +117058,10 @@ var ZWaveNode = (() => {
         propertyKey: valueId.propertyKey
       });
     }
+    /** Returns a list of all `"notification"` event arguments that are known to be supported by this node */
+    getSupportedNotificationEvents() {
+      return getSupportedNotificationEvents(this.driver, this);
+    }
     _interviewAttempts = 0;
     /** How many attempts to interview this node have already been made */
     get interviewAttempts() {
@@ -115591,8 +117130,8 @@ var ZWaveNode = (() => {
       this.nodeType = void 0;
       this.supportsSecurity = void 0;
       this.supportsBeaming = void 0;
-      this._deviceConfig = void 0;
-      this._currentDeviceConfigHash = void 0;
+      this.deviceConfig = void 0;
+      this.currentDeviceConfigHash = void 0;
       this.cachedDeviceConfigHash = void 0;
       this._hasEmittedNoS0NetworkKeyError = false;
       this._hasEmittedNoS2NetworkKeyError = false;
@@ -115674,7 +117213,7 @@ var ZWaveNode = (() => {
       if (this.isControllerNode && this.interviewStage === InterviewStage.ProtocolInfo || !this.isControllerNode && this.interviewStage === InterviewStage.CommandClasses) {
         await this.overwriteConfig();
       }
-      this.cachedDeviceConfigHash = await this._deviceConfig?.getHash();
+      this.cachedDeviceConfigHash = await this.deviceConfig?.getHash();
       this.setInterviewStage(InterviewStage.Complete);
       this.updateReadyMachine({ value: "INTERVIEW_DONE" });
       this.emit("interview completed", this);
@@ -115817,24 +117356,6 @@ protocol version:      ${this.protocolVersion}`;
         return resp.nodeInformation;
       }
       throw new ZWaveError(`Received unexpected response to RequestNodeInfoRequest`, ZWaveErrorCodes.Controller_CommandError);
-    }
-    /**
-     * Loads the device configuration for this node from a config file
-     */
-    async loadDeviceConfig() {
-      if (this.manufacturerId != void 0 && this.productType != void 0 && this.productId != void 0) {
-        this._deviceConfig = await this.driver.configManager.lookupDevice(this.manufacturerId, this.productType, this.productId, this.firmwareVersion);
-        if (this._deviceConfig) {
-          if (this.cachedDeviceConfigHash?.length === 16) {
-            this._currentDeviceConfigHash = await this._deviceConfig.getHash("md5");
-          } else {
-            this._currentDeviceConfigHash = await this._deviceConfig.getHash();
-          }
-          this.driver.controllerLog.logNode(this.id, `${this._deviceConfig.isEmbedded ? "Embedded" : "User-provided"} device config loaded`);
-        } else {
-          this.driver.controllerLog.logNode(this.id, "No device config found", "warn");
-        }
-      }
     }
     /** Step #? of the node interview */
     async interviewCCs() {
@@ -116375,13 +117896,19 @@ protocol version:      ${this.protocolVersion}`;
       }
       this.setInterviewStage(InterviewStage.OverwriteConfig);
     }
+    centralSceneHandlerStore = getDefaultCentralSceneHandlerStore();
+    clockHandlerStore = getDefaultClockHandlerStore();
+    hailHandlerStore = getDefaultHailHandlerStore();
+    notificationHandlerStore = getDefaultNotificationHandlerStore();
+    wakeUpHandlerStore = getDefaultWakeUpHandlerStore();
+    entryControlHandlerStore = getDefaultEntryControlHandlerStore();
     /**
      * @internal
      * Handles a CommandClass that was received from this node
      */
     async handleCommand(command) {
-      if (command.endpointIndex === 0 && command.constructor.name.endsWith("Report") && this.getEndpointCount() >= 1 && this._deviceConfig?.compat?.mapRootReportsToEndpoint != void 0) {
-        const endpoint2 = this.getEndpoint(this._deviceConfig?.compat?.mapRootReportsToEndpoint);
+      if (command.endpointIndex === 0 && command.constructor.name.endsWith("Report") && this.getEndpointCount() >= 1 && this.deviceConfig?.compat?.mapRootReportsToEndpoint != void 0) {
+        const endpoint2 = this.getEndpoint(this.deviceConfig?.compat?.mapRootReportsToEndpoint);
         if (endpoint2 && endpoint2.supportsCC(command.ccId)) {
           this.driver.controllerLog.logNode(this.id, `Mapping unsolicited report from root device to endpoint #${endpoint2.index}`);
           command.endpointIndex = endpoint2.index;
@@ -116401,35 +117928,23 @@ protocol version:      ${this.protocolVersion}`;
         return;
       }
       if (command instanceof BasicCC) {
-        return this.handleBasicCommand(command);
+        return handleBasicCommand(this.driver, this, command);
       } else if (command instanceof MultilevelSwitchCC) {
-        return this.handleMultilevelSwitchCommand(command);
+        return handleMultilevelSwitchCommand(this.driver, this, command);
       } else if (command instanceof BinarySwitchCCSet) {
-        return this.handleBinarySwitchCommand(command);
+        return handleBinarySwitchCommand(this.driver, this, command);
       } else if (command instanceof ThermostatModeCCSet) {
-        return this.handleThermostatModeCommand(command);
+        return handleThermostatModeCommand(this.driver, this, command);
       } else if (command instanceof CentralSceneCCNotification) {
-        return this.handleCentralSceneNotification(command);
+        return handleCentralSceneNotification(this.driver, this, command, this.centralSceneHandlerStore);
       } else if (command instanceof WakeUpCCWakeUpNotification) {
-        return this.handleWakeUpNotification();
+        return handleWakeUpNotification(this.driver, this, command, this.wakeUpHandlerStore);
       } else if (command instanceof NotificationCCReport) {
-        return this.handleNotificationReport(command);
+        return handleNotificationReport(this.driver, this, command, this.notificationHandlerStore);
       } else if (command instanceof ClockCCReport) {
-        return this.handleClockReport(command);
-      } else if (command instanceof SecurityCCNonceGet) {
-        return this.handleSecurityNonceGet();
-      } else if (command instanceof SecurityCCNonceReport) {
-        return this.handleSecurityNonceReport(command);
-      } else if (command instanceof SecurityCCCommandsSupportedGet) {
-        return this.handleSecurityCommandsSupportedGet(command);
-      } else if (command instanceof Security2CCNonceGet) {
-        return this.handleSecurity2NonceGet();
-      } else if (command instanceof Security2CCNonceReport) {
-        return this.handleSecurity2NonceReport(command);
-      } else if (command instanceof Security2CCCommandsSupportedGet) {
-        return this.handleSecurity2CommandsSupportedGet(command);
+        return handleClockReport(this.driver, this, command, this.clockHandlerStore);
       } else if (command instanceof HailCC) {
-        return this.handleHail(command);
+        return handleHail(this.driver, this, command, this.hailHandlerStore);
       } else if (command instanceof FirmwareUpdateMetaDataCCGet) {
         return this.handleUnexpectedFirmwareUpdateGet(command);
       } else if (command instanceof FirmwareUpdateMetaDataCCMetaDataGet) {
@@ -116439,79 +117954,71 @@ protocol version:      ${this.protocolVersion}`;
       } else if (command instanceof FirmwareUpdateMetaDataCCPrepareGet) {
         return this.handleFirmwareUpdatePrepareGet(command);
       } else if (command instanceof EntryControlCCNotification) {
-        return this.handleEntryControlNotification(command);
+        return handleEntryControlNotification(this.driver, this, command, this.entryControlHandlerStore);
       } else if (command instanceof TimeCCTimeGet) {
-        return this.handleTimeGet(command);
+        return handleTimeGet(this.driver, this, command);
       } else if (command instanceof TimeCCDateGet) {
-        return this.handleDateGet(command);
+        return handleDateGet(this.driver, this, command);
       } else if (command instanceof TimeCCTimeOffsetGet) {
-        return this.handleTimeOffsetGet(command);
+        return handleTimeOffsetGet(this.driver, this, command);
       } else if (command instanceof ZWavePlusCCGet) {
-        return this.handleZWavePlusGet(command);
+        return handleZWavePlusGet(this.driver, this, command, this.driver.options.vendor);
       } else if (command instanceof VersionCCGet) {
-        return this.handleVersionGet(command);
+        return handleVersionGet(this.driver, this.driver.controller, this, command, this.driver.options.vendor);
       } else if (command instanceof VersionCCCommandClassGet) {
-        return this.handleVersionCommandClassGet(command);
+        return handleVersionCommandClassGet(this.driver, this, command);
       } else if (command instanceof VersionCCCapabilitiesGet) {
-        return this.handleVersionCapabilitiesGet(command);
+        return handleVersionCapabilitiesGet(this.driver, this, command);
       } else if (command instanceof ManufacturerSpecificCCGet) {
-        return this.handleManufacturerSpecificGet(command);
+        return handleManufacturerSpecificGet(this.driver, this, command, this.driver.options.vendor);
       } else if (command instanceof AssociationGroupInfoCCNameGet) {
-        return this.handleAGINameGet(command);
+        return handleAGINameGet(this.driver, this, command);
       } else if (command instanceof AssociationGroupInfoCCInfoGet) {
-        return this.handleAGIInfoGet(command);
+        return handleAGIInfoGet(this.driver, this, command);
       } else if (command instanceof AssociationGroupInfoCCCommandListGet) {
-        return this.handleAGICommandListGet(command);
+        return handleAGICommandListGet(this.driver, this, command);
       } else if (command instanceof AssociationCCSupportedGroupingsGet) {
-        return this.handleAssociationSupportedGroupingsGet(command);
+        return handleAssociationSupportedGroupingsGet(this.driver, this, command);
       } else if (command instanceof AssociationCCGet) {
-        return this.handleAssociationGet(command);
+        return handleAssociationGet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof AssociationCCSet) {
-        return this.handleAssociationSet(command);
+        return handleAssociationSet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof AssociationCCRemove) {
-        return this.handleAssociationRemove(command);
+        return handleAssociationRemove(this.driver, this.driver.controller, this, command);
       } else if (command instanceof AssociationCCSpecificGroupGet) {
-        return this.handleAssociationSpecificGroupGet(command);
+        return handleAssociationSpecificGroupGet(this.driver, this, command);
       } else if (command instanceof MultiChannelAssociationCCSupportedGroupingsGet) {
-        return this.handleMultiChannelAssociationSupportedGroupingsGet(command);
+        return handleMultiChannelAssociationSupportedGroupingsGet(this.driver, this, command);
       } else if (command instanceof MultiChannelAssociationCCGet) {
-        return this.handleMultiChannelAssociationGet(command);
+        return handleMultiChannelAssociationGet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof MultiChannelAssociationCCSet) {
-        return this.handleMultiChannelAssociationSet(command);
+        return handleMultiChannelAssociationSet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof MultiChannelAssociationCCRemove) {
-        return this.handleMultiChannelAssociationRemove(command);
+        return handleMultiChannelAssociationRemove(this.driver, this.driver.controller, this, command);
       } else if (command instanceof IndicatorCCSupportedGet) {
-        return this.handleIndicatorSupportedGet(command);
+        return handleIndicatorSupportedGet(this.driver, this, command);
       } else if (command instanceof IndicatorCCSet) {
-        return this.handleIndicatorSet(command);
+        return handleIndicatorSet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof IndicatorCCGet) {
-        return this.handleIndicatorGet(command);
+        return handleIndicatorGet(this.driver, this.driver.controller, this, command);
       } else if (command instanceof IndicatorCCDescriptionGet) {
-        return this.handleIndicatorDescriptionGet(command);
+        return handleIndicatorDescriptionGet(this.driver, this, command);
       } else if (command instanceof PowerlevelCCSet) {
-        return this.handlePowerlevelSet(command);
+        return handlePowerlevelSet(this.driver, this, command);
       } else if (command instanceof PowerlevelCCGet) {
-        return this.handlePowerlevelGet(command);
+        return handlePowerlevelGet(this.driver, this, command);
       } else if (command instanceof PowerlevelCCTestNodeSet) {
-        return this.handlePowerlevelTestNodeSet(command);
+        return handlePowerlevelTestNodeSet(this.driver, this, command);
       } else if (command instanceof PowerlevelCCTestNodeGet) {
-        return this.handlePowerlevelTestNodeGet(command);
+        return handlePowerlevelTestNodeGet(this.driver, this, command);
       } else if (command instanceof PowerlevelCCTestNodeReport) {
-        return this.handlePowerlevelTestNodeReport(command);
+        return handlePowerlevelTestNodeReport(this.driver, this, command);
       } else if (command instanceof DeviceResetLocallyCCNotification) {
-        return this.handleDeviceResetLocallyNotification(command);
-      } else if (command instanceof InclusionControllerCCInitiate) {
-        if (command.step === InclusionControllerStep.ProxyInclusion) {
-          return this.driver.controller.handleInclusionControllerCCInitiateProxyInclusion(command);
-        } else if (command.step === InclusionControllerStep.ProxyInclusionReplace) {
-          return this.driver.controller.handleInclusionControllerCCInitiateReplace(command);
-        }
+        return handleDeviceResetLocallyNotification(this.driver, this.driver.controller, this, command);
       } else if (command instanceof MultiCommandCCCommandEncapsulation) {
         for (const cmd of command.encapsulated) {
           await this.handleCommand(cmd);
         }
-        return;
-      } else if (command instanceof Security2CCMessageEncapsulation && command.encapsulated == void 0) {
         return;
       }
       switch (true) {
@@ -116532,960 +118039,6 @@ protocol version:      ${this.protocolVersion}`;
         throw new ZWaveError("No handler for application command", ZWaveErrorCodes.CC_NotSupported);
       }
     }
-    hasLoggedNoNetworkKey = false;
-    /**
-     * @internal
-     * Handles a nonce request
-     */
-    async handleSecurityNonceGet() {
-      if (!this.driver.securityManager) {
-        if (!this.hasLoggedNoNetworkKey) {
-          this.hasLoggedNoNetworkKey = true;
-          this.driver.controllerLog.logNode(this.id, {
-            message: `cannot reply to NonceGet because no network key was configured!`,
-            direction: "inbound",
-            level: "warn"
-          });
-        }
-        return;
-      }
-      this.addCC(CommandClasses.Security, {
-        isSupported: true,
-        version: 1,
-        // Security CC is always secure
-        secure: true
-      });
-      const isNonceReport = /* @__PURE__ */ __name((t) => t.message.getNodeId() === this.id && containsCC(t.message) && t.message.command instanceof SecurityCCNonceReport, "isNonceReport");
-      if (this.driver.hasPendingTransactions(isNonceReport)) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: "in the process of replying to a NonceGet, won't send another NonceReport",
-          level: "warn"
-        });
-        return;
-      }
-      this.driver.securityManager.deleteAllNoncesForReceiver(this.id);
-      try {
-        await this.commandClasses.Security.sendNonce();
-      } catch (e) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `failed to send nonce: ${getErrorMessage(e)}`,
-          direction: "inbound"
-        });
-      }
-    }
-    /**
-     * Is called when a nonce report is received that does not belong to any transaction.
-     * The received nonce reports are stored as "free" nonces
-     */
-    handleSecurityNonceReport(command) {
-      const secMan = this.driver.securityManager;
-      if (!secMan)
-        return;
-      secMan.setNonce({
-        issuer: this.id,
-        nonceId: secMan.getNonceId(command.nonce)
-      }, {
-        nonce: command.nonce,
-        receiver: this.driver.controller.ownNodeId
-      }, { free: true });
-    }
-    /**
-     * @internal
-     * Handles a nonce request for S2
-     */
-    async handleSecurity2NonceGet() {
-      if (!this.driver.getSecurityManager2(this.id)) {
-        if (!this.hasLoggedNoNetworkKey) {
-          this.hasLoggedNoNetworkKey = true;
-          this.driver.controllerLog.logNode(this.id, {
-            message: `cannot reply to NonceGet (S2) because no network key was configured!`,
-            direction: "inbound",
-            level: "warn"
-          });
-        }
-        return;
-      }
-      this.addCC(CommandClasses["Security 2"], {
-        isSupported: true,
-        version: 1,
-        // Security 2 CC is always secure
-        secure: true
-      });
-      const isNonceReport = /* @__PURE__ */ __name((t) => t.message.getNodeId() === this.id && containsCC(t.message) && t.message.command instanceof Security2CCNonceReport, "isNonceReport");
-      if (this.driver.hasPendingTransactions(isNonceReport)) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: "in the process of replying to a NonceGet, won't send another NonceReport",
-          level: "warn"
-        });
-        return;
-      }
-      try {
-        await this.commandClasses["Security 2"].sendNonce();
-      } catch (e) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `failed to send nonce: ${getErrorMessage(e)}`,
-          direction: "inbound"
-        });
-      }
-    }
-    /**
-     * Is called when a nonce report is received that does not belong to any transaction.
-     */
-    handleSecurity2NonceReport(_command) {
-      this.driver.controllerLog.logNode(this.id, {
-        message: `received S2 nonce without an active transaction, not sure what to do with it`,
-        level: "warn",
-        direction: "inbound"
-      });
-    }
-    busyPollingAfterHail = false;
-    async handleHail(_command) {
-      this.markAsAwake();
-      if (this.busyPollingAfterHail) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `Hail received from node, but still busy with previous one...`
-        });
-        return;
-      }
-      this.busyPollingAfterHail = true;
-      this.driver.controllerLog.logNode(this.id, {
-        message: `Hail received from node, refreshing actuator and sensor values...`
-      });
-      try {
-        await this.refreshValues();
-      } catch {
-      }
-      this.busyPollingAfterHail = false;
-    }
-    /** Stores information about a currently held down key */
-    centralSceneKeyHeldDownContext;
-    lastCentralSceneNotificationSequenceNumber;
-    centralSceneForcedKeyUp = false;
-    /** Handles the receipt of a Central Scene notifification */
-    handleCentralSceneNotification(command) {
-      if (command.sequenceNumber === this.lastCentralSceneNotificationSequenceNumber) {
-        return;
-      } else {
-        this.lastCentralSceneNotificationSequenceNumber = command.sequenceNumber;
-      }
-      const setSceneValue = /* @__PURE__ */ __name((sceneNumber, key) => {
-        const valueId = CentralSceneCCValues.scene(sceneNumber).id;
-        this.valueDB.setValue(valueId, key, { stateful: false });
-      }, "setSceneValue");
-      const forceKeyUp = /* @__PURE__ */ __name(() => {
-        this.centralSceneForcedKeyUp = true;
-        setSceneValue(this.centralSceneKeyHeldDownContext.sceneNumber, CentralSceneKeys.KeyReleased);
-        this.centralSceneKeyHeldDownContext?.timeout?.clear();
-        this.centralSceneKeyHeldDownContext = void 0;
-      }, "forceKeyUp");
-      if (this.centralSceneKeyHeldDownContext && this.centralSceneKeyHeldDownContext.sceneNumber !== command.sceneNumber) {
-        forceKeyUp();
-      }
-      const slowRefreshValueId = CentralSceneCCValues.slowRefresh.endpoint(this.index);
-      if (command.keyAttribute === CentralSceneKeys.KeyHeldDown) {
-        this.centralSceneForcedKeyUp = false;
-        this.centralSceneKeyHeldDownContext?.timeout?.clear();
-        const slowRefresh = command.slowRefresh ?? this.valueDB.getValue(slowRefreshValueId);
-        this.centralSceneKeyHeldDownContext = {
-          sceneNumber: command.sceneNumber,
-          // Unref'ing long running timers allows the process to exit mid-timeout
-          timeout: setTimer(forceKeyUp, slowRefresh ? 6e4 : 400).unref()
-        };
-      } else if (command.keyAttribute === CentralSceneKeys.KeyReleased) {
-        if (this.centralSceneKeyHeldDownContext) {
-          this.centralSceneKeyHeldDownContext.timeout.clear();
-          this.centralSceneKeyHeldDownContext = void 0;
-        } else if (this.centralSceneForcedKeyUp) {
-          this.valueDB.setValue(slowRefreshValueId, true);
-          return;
-        }
-      }
-      setSceneValue(command.sceneNumber, command.keyAttribute);
-      this.driver.controllerLog.logNode(this.id, {
-        message: `received CentralScene notification ${stringify(command)}`,
-        direction: "inbound"
-      });
-    }
-    /** The timestamp of the last received wakeup notification */
-    lastWakeUp;
-    /** Handles the receipt of a Wake Up notification */
-    handleWakeUpNotification() {
-      this.driver.controllerLog.logNode(this.id, {
-        message: `received wakeup notification`,
-        direction: "inbound"
-      });
-      if (this.getCCVersion(CommandClasses["Wake Up"]) === 0) {
-        this.addCC(CommandClasses["Wake Up"], {
-          isSupported: true,
-          version: 1
-        });
-      }
-      this.markAsAwake();
-      const now = Date.now();
-      if (this.lastWakeUp) {
-        const wakeUpInterval = this.getValue(WakeUpCCValues.wakeUpInterval.id) ?? 1;
-        if (wakeUpInterval > 0 && (now - this.lastWakeUp) / 1e3 > wakeUpInterval + 5 * 60) {
-          this.commandClasses["Wake Up"].getInterval().catch(() => {
-          });
-        }
-      }
-      this.lastWakeUp = now;
-      if (this._deviceConfig?.compat?.queryOnWakeup) {
-        void this.compatDoWakeupQueries();
-      } else if (!this._deviceConfig?.compat?.disableAutoRefresh) {
-        void this.autoRefreshValues().catch(() => {
-        });
-      }
-      this.driver.debounceSendNodeToSleep(this);
-    }
-    async compatDoWakeupQueries() {
-      if (!this._deviceConfig?.compat?.queryOnWakeup)
-        return;
-      this.driver.controllerLog.logNode(this.id, {
-        message: `expects some queries after wake up, so it shall receive`,
-        direction: "none"
-      });
-      for (const [ccName, apiMethod, ...args] of this._deviceConfig.compat.queryOnWakeup) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `compat query "${ccName}"::${apiMethod}(${args.map((arg) => JSON.stringify(arg)).join(", ")})`,
-          direction: "none"
-        });
-        let API2;
-        try {
-          API2 = this.commandClasses[ccName].withOptions({
-            // Tag the resulting transactions as compat queries
-            tag: "compat",
-            // Do not retry them or they may cause congestion if the node is asleep again
-            maxSendAttempts: 1,
-            // This is for a sleeping node - there's no point in keeping the transactions when the node is asleep
-            expire: 1e4
-          });
-        } catch {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `could not access API, skipping query`,
-            direction: "none",
-            level: "warn"
-          });
-          continue;
-        }
-        if (!API2.isSupported()) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `API not supported, skipping query`,
-            direction: "none",
-            level: "warn"
-          });
-          continue;
-        } else if (!API2[apiMethod]) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `method ${apiMethod} not found on API, skipping query`,
-            direction: "none",
-            level: "warn"
-          });
-          continue;
-        }
-        const method = API2[apiMethod].bind(API2);
-        const methodArgs = args.map((arg) => {
-          if (isObject(arg)) {
-            const valueId = {
-              commandClass: API2.ccId,
-              ...arg
-            };
-            return this.getValue(valueId);
-          }
-          return arg;
-        });
-        try {
-          await method(...methodArgs);
-          this.driver.controllerLog.logNode(this.id, {
-            message: `API call successful`,
-            direction: "none"
-          });
-        } catch (e) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `error during API call: ${getErrorMessage(e)}`,
-            direction: "none",
-            level: "warn"
-          });
-          if (isZWaveError(e) && e.code === ZWaveErrorCodes.Controller_MessageExpired) {
-            return;
-          }
-        }
-      }
-    }
-    /** Handles the receipt of a BasicCC Set or Report */
-    handleBasicCommand(command) {
-      const sourceEndpoint = this.getEndpoint(command.endpointIndex ?? 0) ?? this;
-      let mappedTargetCC;
-      switch (sourceEndpoint.deviceClass?.generic.key) {
-        case 32:
-          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
-          break;
-        case 16:
-          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Switch"]);
-          break;
-        case 17:
-          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Multilevel Switch"]);
-          break;
-        case 18:
-          switch (sourceEndpoint.deviceClass.specific.key) {
-            case 1:
-              mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Switch"]);
-              break;
-            case 2:
-              mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Multilevel Switch"]);
-              break;
-          }
-      }
-      if (command instanceof BasicCCReport) {
-        const basicReportMapping = this.deviceConfig?.compat?.mapBasicReport ?? "auto";
-        if (basicReportMapping === "Binary Sensor") {
-          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
-          if (typeof command.currentValue === "number") {
-            if (mappedTargetCC) {
-              this.driver.controllerLog.logNode(this.id, {
-                endpoint: command.endpointIndex,
-                message: "treating BasicCC::Report as a BinarySensorCC::Report"
-              });
-              mappedTargetCC.setMappedBasicValue(this.driver, command.currentValue);
-            } else {
-              this.driver.controllerLog.logNode(this.id, {
-                endpoint: command.endpointIndex,
-                message: "cannot treat BasicCC::Report as a BinarySensorCC::Report, because the Binary Sensor CC is not supported",
-                level: "warn"
-              });
-            }
-          } else {
-            this.driver.controllerLog.logNode(this.id, {
-              endpoint: command.endpointIndex,
-              message: "cannot map BasicCC::Report to a different CC, because the current value is unknown",
-              level: "warn"
-            });
-          }
-        } else if (basicReportMapping === "auto" || basicReportMapping === false) {
-          const didSetMappedValue = typeof command.currentValue === "number" && basicReportMapping === "auto" && mappedTargetCC?.setMappedBasicValue(this.driver, command.currentValue);
-          if (!didSetMappedValue) {
-            command.persistValues(this.driver);
-          }
-        }
-      } else if (command instanceof BasicCCSet) {
-        const basicSetMapping = this.deviceConfig?.compat?.mapBasicSet ?? "report";
-        if (basicSetMapping === "event") {
-          this.driver.controllerLog.logNode(this.id, {
-            endpoint: command.endpointIndex,
-            message: "treating BasicCC::Set as a value event"
-          });
-          this._valueDB.setValue(BasicCCValues.compatEvent.endpoint(command.endpointIndex), command.targetValue, {
-            stateful: false
-          });
-        } else if (basicSetMapping === "Binary Sensor") {
-          mappedTargetCC = sourceEndpoint.createCCInstanceUnsafe(CommandClasses["Binary Sensor"]);
-          if (mappedTargetCC) {
-            this.driver.controllerLog.logNode(this.id, {
-              endpoint: command.endpointIndex,
-              message: "treating BasicCC::Set as a BinarySensorCC::Report"
-            });
-            mappedTargetCC.setMappedBasicValue(this.driver, command.targetValue);
-          } else {
-            this.driver.controllerLog.logNode(this.id, {
-              endpoint: command.endpointIndex,
-              message: "cannot treat BasicCC::Set as a BinarySensorCC::Report, because the Binary Sensor CC is not supported",
-              level: "warn"
-            });
-          }
-        } else if (!this.deviceConfig?.compat?.mapBasicSet && !!(command.encapsulationFlags & EncapsulationFlags.Supervision)) {
-          if (command.encapsulationFlags & EncapsulationFlags.Supervision) {
-            throw new ZWaveError("Basic CC is not supported", ZWaveErrorCodes.CC_NotSupported);
-          }
-        } else if (basicSetMapping === "auto" || basicSetMapping === "report") {
-          this.driver.controllerLog.logNode(this.id, {
-            endpoint: command.endpointIndex,
-            message: "treating BasicCC::Set as a report"
-          });
-          const didSetMappedValue = basicSetMapping === "auto" && !!mappedTargetCC?.setMappedBasicValue(this.driver, command.targetValue);
-          if (!didSetMappedValue) {
-            this._valueDB.setValue(BasicCCValues.currentValue.endpoint(command.endpointIndex), command.targetValue);
-            if (!sourceEndpoint.controlsCC(CommandClasses.Basic)) {
-              sourceEndpoint.addCC(CommandClasses.Basic, {
-                isControlled: true
-              });
-            }
-          }
-        }
-      }
-    }
-    /** Handles the receipt of a MultilevelCC Set or Report */
-    handleMultilevelSwitchCommand(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex ?? 0) ?? this;
-      if (command instanceof MultilevelSwitchCCSet) {
-        this.driver.controllerLog.logNode(this.id, {
-          endpoint: command.endpointIndex,
-          message: "treating MultiLevelSwitchCCSet::Set as a value event"
-        });
-        this._valueDB.setValue(MultilevelSwitchCCValues.compatEvent.endpoint(command.endpointIndex), command.targetValue, {
-          stateful: false
-        });
-      } else if (command instanceof MultilevelSwitchCCStartLevelChange) {
-        this.driver.controllerLog.logNode(this.id, {
-          endpoint: command.endpointIndex,
-          message: "treating MultilevelSwitchCC::StartLevelChange as a notification"
-        });
-        this.emit("notification", endpoint, CommandClasses["Multilevel Switch"], {
-          eventType: MultilevelSwitchCommand.StartLevelChange,
-          eventTypeLabel: "Start level change",
-          direction: command.direction
-        });
-      } else if (command instanceof MultilevelSwitchCCStopLevelChange) {
-        this.driver.controllerLog.logNode(this.id, {
-          endpoint: command.endpointIndex,
-          message: "treating MultilevelSwitchCC::StopLevelChange as a notification"
-        });
-        this.emit("notification", endpoint, CommandClasses["Multilevel Switch"], {
-          eventType: MultilevelSwitchCommand.StopLevelChange,
-          eventTypeLabel: "Stop level change"
-        });
-      }
-    }
-    handleBinarySwitchCommand(command) {
-      if (command instanceof BinarySwitchCCSet && this._deviceConfig?.compat?.treatSetAsReport?.has(command.constructor.name)) {
-        this.driver.controllerLog.logNode(this.id, {
-          endpoint: command.endpointIndex,
-          message: "treating BinarySwitchCC::Set as a report"
-        });
-        this._valueDB.setValue(BinarySwitchCCValues.currentValue.endpoint(command.endpointIndex), command.targetValue);
-      }
-    }
-    handleThermostatModeCommand(command) {
-      if (command instanceof ThermostatModeCCSet && this._deviceConfig?.compat?.treatSetAsReport?.has(command.constructor.name)) {
-        this.driver.controllerLog.logNode(this.id, {
-          endpoint: command.endpointIndex,
-          message: "treating ThermostatModeCC::Set as a report"
-        });
-        this._valueDB.setValue(ThermostatModeCCValues.thermostatMode.endpoint(command.endpointIndex), command.mode);
-      }
-    }
-    async handleZWavePlusGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      await endpoint.createAPI(CommandClasses["Z-Wave Plus Info"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      }).sendReport({
-        zwavePlusVersion: 2,
-        roleType: ZWavePlusRoleType.CentralStaticController,
-        nodeType: ZWavePlusNodeType.Node,
-        installerIcon: this.driver.options.vendor?.installerIcon ?? 1280,
-        // Generic Gateway
-        userIcon: this.driver.options.vendor?.userIcon ?? 1280
-        // Generic Gateway
-      });
-    }
-    async handleVersionGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      const firmwareVersion1 = (0, import_parse2.default)(libVersion, { loose: true });
-      await api.sendReport({
-        libraryType: ZWaveLibraryTypes["Static Controller"],
-        protocolVersion: this.driver.controller.protocolVersion,
-        firmwareVersions: [
-          // Firmware 0 is the Z-Wave chip firmware
-          this.driver.controller.firmwareVersion,
-          // Firmware 1 is Z-Wave JS itself
-          `${firmwareVersion1.major}.${firmwareVersion1.minor}.${firmwareVersion1.patch}`
-        ],
-        hardwareVersion: this.driver.options.vendor?.hardwareVersion
-      });
-    }
-    async handleVersionCommandClassGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportCCVersion(command.requestedCC);
-    }
-    async handleVersionCapabilitiesGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Version, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportCapabilities();
-    }
-    async handleManufacturerSpecificGet(command) {
-      const api = this.createAPI(CommandClasses["Manufacturer Specific"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.sendReport({
-        manufacturerId: this.driver.options.vendor?.manufacturerId ?? 65535,
-        // Reserved manufacturer ID, definitely invalid!
-        productType: this.driver.options.vendor?.productType ?? 65535,
-        productId: this.driver.options.vendor?.productId ?? 65535
-      });
-    }
-    async handleAGINameGet(command) {
-      if (command.groupId !== 1) {
-        return;
-      }
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportGroupName(1, "Lifeline");
-    }
-    async handleAGIInfoGet(command) {
-      if (!command.listMode && command.groupId !== 1) {
-        return;
-      }
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportGroupInfo({
-        isListMode: command.listMode ?? false,
-        hasDynamicInfo: false,
-        groups: [
-          {
-            groupId: 1,
-            eventCode: 0,
-            // ignored anyways
-            profile: AssociationGroupInfoProfile["General: Lifeline"],
-            mode: 0
-            // ignored anyways
-          }
-        ]
-      });
-    }
-    async handleAGICommandListGet(command) {
-      if (command.groupId !== 1) {
-        return;
-      }
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses["Association Group Information"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportCommands(command.groupId, /* @__PURE__ */ new Map([
-        [
-          CommandClasses["Device Reset Locally"],
-          [DeviceResetLocallyCommand.Notification]
-        ]
-      ]));
-    }
-    async handleAssociationSupportedGroupingsGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportGroupCount(1);
-    }
-    async handleAssociationGet(command) {
-      const groupId = 1;
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      const nodeIds = this.driver.controller.associations.filter((a) => a.endpoint == void 0).map((a) => a.nodeId) ?? [];
-      await api.sendReport({
-        groupId,
-        maxNodes: MAX_ASSOCIATIONS,
-        nodeIds,
-        reportsToFollow: 0
-      });
-    }
-    handleAssociationSet(command) {
-      if (command.groupId !== 1) {
-        throw new ZWaveError(`Association group ${command.groupId} is not supported.`, ZWaveErrorCodes.CC_OperationFailed);
-      }
-      const newAssociations = command.nodeIds.filter((newNodeId) => !this.driver.controller.associations.some(({ nodeId, endpoint }) => endpoint === void 0 && nodeId === newNodeId)).map((nodeId) => ({ nodeId }));
-      const associations = [...this.driver.controller.associations];
-      associations.push(...newAssociations);
-      if (associations.length > MAX_ASSOCIATIONS) {
-        throw new ZWaveError(`Association group ${command.groupId} is full`, ZWaveErrorCodes.CC_OperationFailed);
-      }
-      this.driver.controller.associations = associations;
-    }
-    handleAssociationRemove(command) {
-      if (!!command.groupId && command.groupId !== 1) {
-        return;
-      }
-      if (!command.nodeIds?.length) {
-        this.driver.controller.associations = [];
-      } else {
-        this.driver.controller.associations = this.driver.controller.associations.filter(({ nodeId, endpoint }) => endpoint === void 0 && !command.nodeIds.includes(nodeId));
-      }
-    }
-    async handleAssociationSpecificGroupGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Association, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportSpecificGroup(0);
-    }
-    async handleMultiChannelAssociationSupportedGroupingsGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses["Multi Channel Association"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportGroupCount(1);
-    }
-    async handleMultiChannelAssociationGet(command) {
-      const groupId = 1;
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses["Multi Channel Association"], false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      const nodeIds = this.driver.controller.associations.filter((a) => a.endpoint == void 0).map((a) => a.nodeId) ?? [];
-      const endpoints = this.driver.controller.associations.filter((a) => a.endpoint != void 0).map(({ nodeId, endpoint: endpoint2 }) => ({
-        nodeId,
-        endpoint: endpoint2
-      })) ?? [];
-      await api.sendReport({
-        groupId,
-        maxNodes: MAX_ASSOCIATIONS,
-        nodeIds,
-        endpoints,
-        reportsToFollow: 0
-      });
-    }
-    handleMultiChannelAssociationSet(command) {
-      if (command.groupId !== 1) {
-        throw new ZWaveError(`Multi Channel Association group ${command.groupId} is not supported.`, ZWaveErrorCodes.CC_OperationFailed);
-      }
-      const newNodeIdAssociations = command.nodeIds.filter((newNodeId) => !this.driver.controller.associations.some(({ nodeId, endpoint }) => endpoint === void 0 && nodeId === newNodeId)).map((nodeId) => ({ nodeId }));
-      const newEndpointAssociations = command.endpoints.flatMap(({ nodeId, endpoint }) => {
-        if (typeof endpoint === "number") {
-          return { nodeId, endpoint };
-        } else {
-          return endpoint.map((e) => ({ nodeId, endpoint: e }));
-        }
-      }).filter(({ nodeId: newNodeId, endpoint: newEndpoint }) => !this.driver.controller.associations.some(({ nodeId, endpoint }) => nodeId === newNodeId && endpoint === newEndpoint));
-      const associations = [...this.driver.controller.associations];
-      associations.push(...newNodeIdAssociations, ...newEndpointAssociations);
-      if (associations.length > MAX_ASSOCIATIONS) {
-        throw new ZWaveError(`Multi Channel Association group ${command.groupId} is full`, ZWaveErrorCodes.CC_OperationFailed);
-      }
-      this.driver.controller.associations = associations.slice(0, MAX_ASSOCIATIONS);
-    }
-    handleMultiChannelAssociationRemove(command) {
-      if (!!command.groupId && command.groupId !== 1) {
-        return;
-      }
-      if (!command.nodeIds?.length && !command.endpoints?.length) {
-        this.driver.controller.associations = [];
-      } else {
-        let associations = [...this.driver.controller.associations];
-        if (command.nodeIds?.length) {
-          associations = associations.filter(({ nodeId, endpoint }) => endpoint === void 0 && !command.nodeIds.includes(nodeId));
-        }
-        if (command.endpoints?.length) {
-          associations = associations.filter(({ nodeId, endpoint }) => !command.endpoints.some((dest) => dest.nodeId === nodeId && dest.endpoint === endpoint));
-        }
-        this.driver.controller.associations = associations;
-      }
-    }
-    handleIndicatorSupportedGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      switch (command.indicatorId) {
-        case 0:
-        // 0 must be answered with the first supported indicator ID.
-        // We only support identify (0x50)
-        case 80:
-          return api.reportSupported(80, [3, 4, 5], 0);
-        default:
-          return api.reportSupported(0, [], 0);
-      }
-    }
-    handleIndicatorSet(command) {
-      if (command.values?.length !== 3)
-        return;
-      const [v1, v2, v3] = command.values;
-      if (v1.indicatorId !== 80 || v1.propertyId !== 3)
-        return;
-      if (v2.indicatorId !== 80 || v2.propertyId !== 4)
-        return;
-      if (v3.indicatorId !== 80 || v3.propertyId !== 5)
-        return;
-      const store = this.driver.controller.indicatorValues;
-      store.set(80, [v1, v2, v3]);
-      this.driver.controllerLog.logNode(this.id, {
-        message: "Received identify command",
-        direction: "inbound"
-      });
-      this.driver.controller.emit("identify", this);
-    }
-    async handleIndicatorGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      if (command.indicatorId === 80) {
-        const values = this.driver.controller.indicatorValues.get(80) ?? [
-          { indicatorId: 80, propertyId: 3, value: 0 },
-          { indicatorId: 80, propertyId: 4, value: 0 },
-          { indicatorId: 80, propertyId: 5, value: 0 }
-        ];
-        await api.sendReport({ values });
-      } else if (typeof command.indicatorId === "number") {
-        await api.sendReport({
-          values: [
-            {
-              indicatorId: command.indicatorId,
-              propertyId: 0,
-              value: 0
-            }
-          ]
-        });
-      } else {
-        await api.sendReport({ value: 0 });
-      }
-    }
-    async handleIndicatorDescriptionGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Indicator, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      await api.reportDescription(command.indicatorId, "");
-    }
-    handlePowerlevelSet(command) {
-      if (!(command.powerlevel in Powerlevel)) {
-        throw new ZWaveError(`Invalid powerlevel ${command.powerlevel}.`, ZWaveErrorCodes.CC_OperationFailed);
-      }
-      this.driver.controller.powerlevel = {
-        powerlevel: command.powerlevel,
-        until: command.timeout ? new Date(Date.now() + command.timeout * 1e3) : /* @__PURE__ */ new Date()
-      };
-    }
-    async handlePowerlevelGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      const { powerlevel, until } = this.driver.controller.powerlevel;
-      if (
-        // Setting elapsed
-        until.getTime() < Date.now() || powerlevel === Powerlevel["Normal Power"]
-      ) {
-        await api.reportPowerlevel({
-          powerlevel: Powerlevel["Normal Power"]
-        });
-      } else {
-        const timeoutSeconds = Math.max(0, Math.min(Math.round((until.getTime() - Date.now()) / 1e3), 255));
-        await api.reportPowerlevel({
-          powerlevel,
-          timeout: timeoutSeconds
-        });
-      }
-    }
-    async handlePowerlevelTestNodeSet(command) {
-      if (!(command.powerlevel in Powerlevel)) {
-        throw new ZWaveError(`Invalid powerlevel ${command.powerlevel}.`, ZWaveErrorCodes.CC_OperationFailed);
-      } else if (command.testFrameCount < 1) {
-        throw new ZWaveError("testFrameCount must be at least 1", ZWaveErrorCodes.CC_OperationFailed);
-      }
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      try {
-        const acknowledgedFrames = await this.driver.sendNOPPowerFrames(command.testNodeId, command.powerlevel, command.testFrameCount);
-        void api.sendNodeTestReport({
-          status: acknowledgedFrames > 0 ? PowerlevelTestStatus.Success : PowerlevelTestStatus.Failed,
-          testNodeId: command.testNodeId,
-          acknowledgedFrames
-        }).catch(noop);
-      } catch {
-        void api.sendNodeTestReport({
-          status: PowerlevelTestStatus.Failed,
-          testNodeId: command.testNodeId,
-          acknowledgedFrames: 0
-        }).catch(noop);
-      }
-    }
-    async handlePowerlevelTestNodeGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const api = endpoint.createAPI(CommandClasses.Powerlevel, false).withOptions({
-        // Answer with the same encapsulation as asked, but omit
-        // Supervision as it shouldn't be used for Get-Report flows
-        encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-      });
-      const status = this.driver.getNOPPowerTestStatus();
-      if (status) {
-        await api.sendNodeTestReport({
-          status: status.inProgress ? PowerlevelTestStatus["In Progress"] : status.acknowledgedFrames > 0 ? PowerlevelTestStatus.Success : PowerlevelTestStatus.Failed,
-          ...status
-        });
-      } else {
-        await api.sendNodeTestReport({
-          status: PowerlevelTestStatus.Success,
-          testNodeId: 0,
-          acknowledgedFrames: 0
-        });
-      }
-    }
-    handlePowerlevelTestNodeReport(command) {
-      this.emit("notification", this, CommandClasses.Powerlevel, pick(command, ["testNodeId", "status", "acknowledgedFrames"]));
-    }
-    async handleSecurityCommandsSupportedGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      if (this.getHighestSecurityClass() === SecurityClass.S0_Legacy) {
-        const { supportedCCs } = determineNIF();
-        await endpoint.commandClasses.Security.reportSupportedCommands(
-          supportedCCs,
-          // We don't report controlled CCs
-          []
-        );
-      } else {
-        await endpoint.commandClasses.Security.reportSupportedCommands([], []);
-      }
-    }
-    async handleSecurity2CommandsSupportedGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const highestSecurityClass = this.getHighestSecurityClass();
-      const actualSecurityClass = command.getEncapsulatingCC(CommandClasses["Security 2"], Security2Command.MessageEncapsulation)?.securityClass;
-      if (highestSecurityClass !== void 0 && highestSecurityClass === actualSecurityClass) {
-        const implementedCCs = allCCs.filter((cc) => getImplementedVersion(cc) > 0);
-        const implementedEncapsulationCCs = encapsulationCCs.filter((cc) => implementedCCs.includes(cc) && cc !== CommandClasses["Multi Channel"]);
-        const supportedCCs = /* @__PURE__ */ new Set([
-          // DT:00.11.0004.1
-          // All Root Devices or nodes MUST support:
-          // - Association, version 2
-          // - Association Group Information
-          // - Device Reset Locally
-          // - Firmware Update Meta Data, version 5
-          // - Indicator, version 3
-          // - Manufacturer Specific
-          // - Multi Channel Association, version 3
-          // - Powerlevel
-          // - Security 2
-          // - Supervision
-          // - Transport Service, version 2
-          // - Version, version 2
-          // - Z-Wave Plus Info, version 2
-          CommandClasses.Association,
-          CommandClasses["Association Group Information"],
-          CommandClasses["Device Reset Locally"],
-          CommandClasses["Firmware Update Meta Data"],
-          CommandClasses.Indicator,
-          CommandClasses["Manufacturer Specific"],
-          CommandClasses["Multi Channel Association"],
-          CommandClasses.Powerlevel,
-          CommandClasses.Version,
-          CommandClasses["Z-Wave Plus Info"],
-          // Generic Controller device type has no additional support requirements,
-          // but we also support the following command classes:
-          CommandClasses["Inclusion Controller"],
-          // plus encapsulation CCs, which are part of the above requirement
-          ...implementedEncapsulationCCs.filter((cc) => (
-            // CC:009F.01.0E.11.00F
-            // The Security 0 and Security 2 Command Class MUST NOT be advertised in this command
-            // The Transport Service Command Class MUST NOT be advertised in this command.
-            cc !== CommandClasses.Security && cc !== CommandClasses["Security 2"] && cc !== CommandClasses["Transport Service"]
-          ))
-        ]);
-        const commandsInNIF = new Set(determineNIF().supportedCCs);
-        const supportedCommandsNotInNIF = [...supportedCCs].filter((cc) => !commandsInNIF.has(cc));
-        await endpoint.commandClasses["Security 2"].reportSupportedCommands(supportedCommandsNotInNIF);
-      } else if (securityClassIsS2(actualSecurityClass)) {
-        await endpoint.commandClasses["Security 2"].withOptions({
-          s2OverrideSecurityClass: actualSecurityClass
-        }).reportSupportedCommands([]);
-      } else {
-      }
-    }
-    handleDeviceResetLocallyNotification(cmd) {
-      if (cmd.endpointIndex !== 0) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `Received reset locally notification from non-root endpoint - ignoring it...`,
-          direction: "inbound"
-        });
-        return;
-      }
-      setTimeout(async () => {
-        this.driver.controllerLog.logNode(this.id, {
-          message: `The node was reset locally, removing it`,
-          direction: "inbound"
-        });
-        try {
-          await this.driver.controller.removeFailedNodeInternal(this.id, RemoveNodeReason.Reset);
-        } catch (e) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `removing the node failed: ${getErrorMessage(e)}`,
-            level: "error"
-          });
-        }
-      }, 500);
-    }
-    /**
-     * Allows automatically resetting notification values to idle if the node does not do it itself
-     */
-    notificationIdleTimeouts = /* @__PURE__ */ new Map();
-    /** Schedules a notification value to be reset */
-    scheduleNotificationIdleReset(valueId, handler) {
-      this.clearNotificationIdleReset(valueId);
-      const key = valueIdToString(valueId);
-      this.notificationIdleTimeouts.set(
-        key,
-        // Unref'ing long running timeouts allows to quit the application before the timeout elapses
-        setTimer(
-          handler,
-          5 * 60 * 1e3
-          /* 5 minutes */
-        ).unref()
-      );
-    }
-    /** Removes a scheduled notification reset */
-    clearNotificationIdleReset(valueId) {
-      const key = valueIdToString(valueId);
-      if (this.notificationIdleTimeouts.has(key)) {
-        this.notificationIdleTimeouts.get(key)?.clear();
-        this.notificationIdleTimeouts.delete(key);
-      }
-    }
-    // Fallback for V2 notifications that don't allow us to predefine the metadata during the interview.
-    // Instead of defining useless values for each possible notification event, we build the metadata on demand
-    extendNotificationValueMetadata(valueId, notification, valueConfig) {
-      const ccVersion = this.driver.getSupportedCCVersion(CommandClasses.Notification, this.id, this.index);
-      if (ccVersion === 2 || !this.valueDB.hasMetadata(valueId)) {
-        const metadata = getNotificationValueMetadata(this.valueDB.getMetadata(valueId), notification, valueConfig);
-        this.valueDB.setMetadata(valueId, metadata);
-      }
-    }
     manuallyIdleNotificationValue(notificationTypeOrValueID, prevValue, endpointIndex = 0) {
       let notificationType;
       if (typeof notificationTypeOrValueID === "number") {
@@ -117504,333 +118057,7 @@ protocol version:      ${this.protocolVersion}`;
       const notification = getNotification(notificationType);
       if (!notification)
         return;
-      return this.manuallyIdleNotificationValueInternal(notification, prevValue, endpointIndex);
-    }
-    /** Manually resets a single notification value to idle */
-    manuallyIdleNotificationValueInternal(notification, prevValue, endpointIndex) {
-      const valueConfig = getNotificationValue(notification, prevValue);
-      if (!valueConfig || valueConfig.type !== "state")
-        return;
-      if (!valueConfig.idle)
-        return;
-      const notificationName = notification.name;
-      const variableName = valueConfig.variableName;
-      const valueId = NotificationCCValues.notificationVariable(notificationName, variableName).endpoint(endpointIndex);
-      if (this.valueDB.getValue(valueId) !== prevValue)
-        return;
-      this.clearNotificationIdleReset(valueId);
-      this.extendNotificationValueMetadata(valueId, notification, valueConfig);
-      this.valueDB.setValue(
-        valueId,
-        0
-        /* idle */
-      );
-    }
-    /**
-     * Handles the receipt of a Notification Report
-     */
-    handleNotificationReport(command) {
-      if (command.notificationType == void 0) {
-        if (command.alarmType == void 0) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `received unsupported notification ${stringify(command)}`,
-            direction: "inbound"
-          });
-        }
-        return;
-      }
-      const ccVersion = getEffectiveCCVersion(this.driver, command);
-      const notification = getNotification(command.notificationType);
-      if (notification) {
-        const notificationName = notification.name;
-        this.driver.controllerLog.logNode(this.id, {
-          message: `[handleNotificationReport] notificationName: ${notificationName}`,
-          level: "silly"
-        });
-        const setStateIdle = /* @__PURE__ */ __name((prevValue) => {
-          this.manuallyIdleNotificationValueInternal(notification, prevValue, command.endpointIndex);
-        }, "setStateIdle");
-        const setUnknownStateIdle = /* @__PURE__ */ __name((prevValue) => {
-          const unknownNotificationVariableValueId = NotificationCCValues.unknownNotificationVariable(command.notificationType, notificationName).endpoint(command.endpointIndex);
-          const currentValue = this.valueDB.getValue(unknownNotificationVariableValueId);
-          if (currentValue == void 0)
-            return;
-          if (prevValue == void 0 || currentValue === prevValue) {
-            this.valueDB.setValue(unknownNotificationVariableValueId, 0);
-          }
-        }, "setUnknownStateIdle");
-        const value = command.notificationEvent;
-        if (value === 0) {
-          if (isUint8Array(command.eventParameters) && command.eventParameters.length) {
-            setStateIdle(command.eventParameters[0]);
-            setUnknownStateIdle(command.eventParameters[0]);
-          } else {
-            const nonIdleValues = this.valueDB.getValues(CommandClasses.Notification).filter((v) => (v.endpoint || 0) === command.endpointIndex && v.property === notificationName && typeof v.value === "number" && v.value !== 0);
-            for (const v of nonIdleValues) {
-              setStateIdle(v.value);
-            }
-            setUnknownStateIdle();
-          }
-          return;
-        }
-        const valueConfig = getNotificationValue(notification, value);
-        if (valueConfig) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `[handleNotificationReport] valueConfig:
-  label: ${valueConfig.label}
-  ${valueConfig.type === "event" ? "type: event" : `type: state
-  variableName: ${valueConfig.variableName}`}`,
-            level: "silly"
-          });
-        } else {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `[handleNotificationReport] valueConfig: undefined`,
-            level: "silly"
-          });
-        }
-        this.handleKnownNotification(command);
-        let allowIdleReset;
-        if (!valueConfig) {
-          allowIdleReset = false;
-        } else if (valueConfig.type === "state") {
-          allowIdleReset = valueConfig.idle;
-        } else {
-          const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-          this.emit("notification", endpoint, CommandClasses.Notification, {
-            type: command.notificationType,
-            event: value,
-            label: notification.name,
-            eventLabel: valueConfig.label,
-            parameters: command.eventParameters
-          });
-          if (valueConfig.idleVariables?.length) {
-            for (const variable of valueConfig.idleVariables) {
-              setStateIdle(variable);
-            }
-          }
-          return;
-        }
-        let valueId;
-        if (valueConfig) {
-          valueId = NotificationCCValues.notificationVariable(notificationName, valueConfig.variableName).endpoint(command.endpointIndex);
-          this.extendNotificationValueMetadata(valueId, notification, valueConfig);
-        } else {
-          const unknownValue = NotificationCCValues.unknownNotificationVariable(command.notificationType, notificationName);
-          valueId = unknownValue.endpoint(command.endpointIndex);
-          if (ccVersion >= 2) {
-            if (!this.valueDB.hasMetadata(valueId)) {
-              this.valueDB.setMetadata(valueId, unknownValue.meta);
-            }
-          }
-        }
-        if (typeof command.eventParameters === "number") {
-          const enumBehavior = valueConfig ? getNotificationEnumBehavior(notification, valueConfig) : "extend";
-          const valueWithEnum = enumBehavior === "replace" ? command.eventParameters : getNotificationStateValueWithEnum(value, command.eventParameters);
-          this.valueDB.setValue(valueId, valueWithEnum);
-        } else {
-          this.valueDB.setValue(valueId, value);
-        }
-        if (allowIdleReset && !!this._deviceConfig?.compat?.forceNotificationIdleReset) {
-          this.driver.controllerLog.logNode(this.id, {
-            message: `[handleNotificationReport] scheduling idle reset`,
-            level: "silly"
-          });
-          this.scheduleNotificationIdleReset(valueId, () => setStateIdle(value));
-        }
-      } else {
-        const unknownValue = NotificationCCValues.unknownNotificationType(command.notificationType);
-        const valueId = unknownValue.endpoint(command.endpointIndex);
-        if (ccVersion >= 2) {
-          if (!this.valueDB.hasMetadata(valueId)) {
-            this.valueDB.setMetadata(valueId, unknownValue.meta);
-          }
-        }
-        this.valueDB.setValue(valueId, command.notificationEvent);
-      }
-    }
-    handleKnownNotification(command) {
-      const lockEvents = [1, 3, 5, 9];
-      const unlockEvents = [2, 4, 6];
-      const doorStatusEvents = [
-        // Actual status
-        22,
-        23,
-        // Synthetic status with enum
-        5632,
-        5633
-      ];
-      if (
-        // Access Control, manual/keypad/rf/auto (un)lock operation
-        command.notificationType === 6 && (lockEvents.includes(command.notificationEvent) || unlockEvents.includes(command.notificationEvent)) && (this.supportsCC(CommandClasses["Door Lock"]) || this.supportsCC(CommandClasses.Lock))
-      ) {
-        const isLocked = lockEvents.includes(command.notificationEvent);
-        if (this.supportsCC(CommandClasses["Door Lock"])) {
-          this.valueDB.setValue(DoorLockCCValues.currentMode.endpoint(command.endpointIndex), isLocked ? DoorLockMode.Secured : DoorLockMode.Unsecured);
-        }
-        if (this.supportsCC(CommandClasses.Lock)) {
-          this.valueDB.setValue(LockCCValues.locked.endpoint(command.endpointIndex), isLocked);
-        }
-      } else if (command.notificationType === 6 && doorStatusEvents.includes(command.notificationEvent)) {
-        this.valueDB.setValue(NotificationCCValues.doorStateSimple.endpoint(command.endpointIndex), command.notificationEvent === 23 ? 23 : 22);
-        const tiltValue = NotificationCCValues.doorTiltState;
-        const tiltValueId = tiltValue.endpoint(command.endpointIndex);
-        let tiltValueWasCreated = this.valueDB.hasMetadata(tiltValueId);
-        if (command.eventParameters === 1 && !tiltValueWasCreated) {
-          this.valueDB.setMetadata(tiltValueId, tiltValue.meta);
-          tiltValueWasCreated = true;
-        }
-        if (tiltValueWasCreated) {
-          this.valueDB.setValue(tiltValueId, command.eventParameters === 1 ? 1 : 0);
-        }
-      }
-    }
-    busySettingClock = false;
-    async handleClockReport(command) {
-      if (this.busySettingClock)
-        return;
-      let now = /* @__PURE__ */ new Date();
-      const seconds = now.getSeconds();
-      if (seconds >= 30) {
-        now = new Date(now.getTime() + (60 - seconds) * 1e3);
-      }
-      const hours = now.getHours();
-      const minutes = now.getMinutes();
-      let weekday = now.getDay();
-      if (weekday === 0)
-        weekday = 7;
-      if (command.weekday !== weekday || command.hour !== hours || command.minute !== minutes) {
-        const endpoint = this.driver.tryGetEndpoint(command);
-        if (!endpoint) {
-          return;
-        }
-        this.driver.controllerLog.logNode(this.id, `detected a deviation of the node's clock, updating it...`);
-        this.busySettingClock = true;
-        try {
-          await endpoint.commandClasses.Clock.set(hours, minutes, weekday);
-        } catch {
-        }
-        this.busySettingClock = false;
-      }
-    }
-    async handleTimeGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const now = /* @__PURE__ */ new Date();
-      const hours = now.getHours();
-      const minutes = now.getMinutes();
-      const seconds = now.getSeconds();
-      try {
-        const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
-          // Answer with the same encapsulation as asked, but omit
-          // Supervision as it shouldn't be used for Get-Report flows
-          encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-        });
-        await api.reportTime(hours, minutes, seconds);
-      } catch (e) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: e.message,
-          level: "error"
-        });
-      }
-    }
-    async handleDateGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const now = /* @__PURE__ */ new Date();
-      const year = now.getFullYear();
-      const month = now.getMonth() + 1;
-      const day = now.getDate();
-      try {
-        const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
-          // Answer with the same encapsulation as asked, but omit
-          // Supervision as it shouldn't be used for Get-Report flows
-          encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-        });
-        await api.reportDate(year, month, day);
-      } catch (e) {
-        this.driver.controllerLog.logNode(this.id, {
-          message: e.message,
-          level: "error"
-        });
-      }
-    }
-    async handleTimeOffsetGet(command) {
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      const timezone = getDSTInfo(/* @__PURE__ */ new Date());
-      try {
-        const api = endpoint.createAPI(CommandClasses.Time, false).withOptions({
-          // Answer with the same encapsulation as asked, but omit
-          // Supervision as it shouldn't be used for Get-Report flows
-          encapsulationFlags: command.encapsulationFlags & ~EncapsulationFlags.Supervision
-        });
-        await api.reportTimezone(timezone);
-      } catch {
-      }
-    }
-    /**
-     * Retrieves the firmware update capabilities of a node to decide which options to offer a user prior to the update.
-     * This method uses cached information from the most recent interview.
-     */
-    getFirmwareUpdateCapabilitiesCached() {
-      const firmwareUpgradable = this.getValue(FirmwareUpdateMetaDataCCValues.firmwareUpgradable.id);
-      const supportsActivation = this.getValue(FirmwareUpdateMetaDataCCValues.supportsActivation.id);
-      const continuesToFunction = this.getValue(FirmwareUpdateMetaDataCCValues.continuesToFunction.id);
-      const additionalFirmwareIDs = this.getValue(FirmwareUpdateMetaDataCCValues.additionalFirmwareIDs.id);
-      const supportsResuming = this.getValue(FirmwareUpdateMetaDataCCValues.supportsResuming.id);
-      const supportsNonSecureTransfer = this.getValue(FirmwareUpdateMetaDataCCValues.supportsNonSecureTransfer.id);
-      if (!firmwareUpgradable || !isArray(additionalFirmwareIDs)) {
-        return { firmwareUpgradable: false };
-      }
-      return {
-        firmwareUpgradable: true,
-        // TODO: Targets are not the list of IDs - maybe expose the IDs as well?
-        firmwareTargets: new Array(1 + additionalFirmwareIDs.length).fill(0).map((_, i) => i),
-        continuesToFunction,
-        supportsActivation,
-        supportsResuming,
-        supportsNonSecureTransfer
-      };
-    }
-    /**
-     * Retrieves the firmware update capabilities of a node to decide which options to offer a user prior to the update.
-     * This communicates with the node to retrieve fresh information.
-     */
-    async getFirmwareUpdateCapabilities() {
-      const api = this.commandClasses["Firmware Update Meta Data"];
-      const meta = await api.getMetaData();
-      if (!meta) {
-        throw new ZWaveError(`Failed to request firmware update capabilities: The node did not respond in time!`, ZWaveErrorCodes.Controller_NodeTimeout);
-      } else if (!meta.firmwareUpgradable) {
-        return {
-          firmwareUpgradable: false
-        };
-      }
-      return {
-        firmwareUpgradable: true,
-        // TODO: Targets are not the list of IDs - maybe expose the IDs as well?
-        firmwareTargets: new Array(1 + meta.additionalFirmwareIDs.length).fill(0).map((_, i) => i),
-        continuesToFunction: meta.continuesToFunction,
-        supportsActivation: meta.supportsActivation,
-        supportsResuming: meta.supportsResuming,
-        supportsNonSecureTransfer: meta.supportsNonSecureTransfer
-      };
-    }
-    recentEntryControlNotificationSequenceNumbers = [];
-    handleEntryControlNotification(command) {
-      if (!this._deviceConfig?.compat?.disableStrictEntryControlDataValidation) {
-        if (this.recentEntryControlNotificationSequenceNumbers.includes(command.sequenceNumber)) {
-          this.driver.controllerLog.logNode(this.id, `Received duplicate Entry Control Notification (sequence number ${command.sequenceNumber}), ignoring...`, "warn");
-          return;
-        }
-        this.recentEntryControlNotificationSequenceNumbers.unshift(command.sequenceNumber);
-        if (this.recentEntryControlNotificationSequenceNumbers.length > 5) {
-          this.recentEntryControlNotificationSequenceNumbers.pop();
-        }
-      }
-      const endpoint = this.getEndpoint(command.endpointIndex) ?? this;
-      this.emit("notification", endpoint, CommandClasses["Entry Control"], {
-        ...pick(command, ["eventType", "dataType", "eventData"]),
-        eventTypeLabel: entryControlEventTypeLabels[command.eventType],
-        dataTypeLabel: getEnumMemberName(EntryControlDataTypes, command.dataType)
-      });
+      return manuallyIdleNotificationValueInternal(this.driver, this, this.notificationHandlerStore, notification, prevValue, endpointIndex);
     }
     /**
      * @internal
@@ -118675,23 +118902,6 @@ ${formatRouteHealthCheckSummary(this.id, otherNode.id, summary)}`);
       const api = this.createAPI(CommandClasses["Device Reset Locally"], false);
       await api.sendNotification();
     }
-    /**
-     * Returns whether the device config for this node has changed since the last interview.
-     * If it has, the node likely needs to be re-interviewed for the changes to be picked up.
-     */
-    hasDeviceConfigChanged() {
-      if (this.interviewStage !== InterviewStage.Complete)
-        return NOT_KNOWN;
-      if (this.isControllerNode)
-        return false;
-      if (this.cachedDeviceConfigHash == void 0) {
-        return this.deviceConfig == void 0 ? false : NOT_KNOWN;
-      }
-      if (this._currentDeviceConfigHash) {
-        return !Bytes.view(this._currentDeviceConfigHash).equals(this.cachedDeviceConfigHash);
-      }
-      return true;
-    }
     /** Returns a dump of this node's information for debugging purposes */
     createDump() {
       const { index, ...endpointDump } = this.createEndpointDump();
@@ -119350,6 +119560,7 @@ function rfRegionToUpdateServiceRegion(rfRegion) {
   switch (rfRegion) {
     case RFRegion["Default (EU)"]:
     case RFRegion.Europe:
+    case RFRegion["Europe (Long Range)"]:
       return "europe";
     case RFRegion.USA:
     case RFRegion["USA (Long Range)"]:
@@ -120157,7 +120368,6 @@ var ZWaveController = (() => {
     /** @internal */
     constructor(driver2) {
       super();
-      debugger;
       this.driver = driver2;
       this._nodes = createThrowingMap((nodeId) => {
         throw new ZWaveError(`Node ${nodeId} was not found!`, ZWaveErrorCodes.Controller_NodeNotFound, nodeId);
