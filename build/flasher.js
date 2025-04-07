@@ -8486,7 +8486,7 @@ var require_package6 = __commonJS({
   "../zwave-js/package.json"(exports5, module) {
     module.exports = {
       name: "zwave-js",
-      version: "15.0.2",
+      version: "15.0.5",
       description: "Z-Wave driver written entirely in JavaScript/TypeScript",
       keywords: [],
       type: "module",
@@ -8610,7 +8610,7 @@ var require_package6 = __commonJS({
       },
       devDependencies: {
         "@alcalzone/esm2cjs": "^1.4.1",
-        "@microsoft/api-extractor": "^7.48.0",
+        "@microsoft/api-extractor": "^7.52.2",
         "@types/node": "^20.17.16",
         "@types/semver": "^7.5.8",
         "@types/sinon": "^17.0.3",
@@ -9554,17 +9554,15 @@ var fs = new IndexedDBFileSystem();
 
 // ../bindings-browser/build/serial/browser.js
 function createWebSerialPortFactory(port2) {
+  let writer;
   const sink = {
     close() {
+      writer?.releaseLock();
       port2.close();
     },
     async write(chunk) {
-      const writer = port2.writable.getWriter();
-      try {
-        await writer.write(chunk);
-      } finally {
-        writer.releaseLock();
-      }
+      writer ??= port2.writable.getWriter();
+      await writer.write(chunk);
     }
   };
   let reader;
@@ -22209,6 +22207,7 @@ var ZWaveSerialStream = class {
   }
   async close() {
     this._isOpen = false;
+    this._writer?.releaseLock();
     this.#abort.abort();
     return Promise.resolve();
   }
@@ -22216,6 +22215,7 @@ var ZWaveSerialStream = class {
   get isOpen() {
     return this._isOpen;
   }
+  _writer;
   async writeAsync(data) {
     if (!this.isOpen) {
       throw new Error("The serial port is not open!");
@@ -22235,12 +22235,8 @@ var ZWaveSerialStream = class {
     } else {
       this.logger.data("outbound", data);
     }
-    const writer = this.writable.getWriter();
-    try {
-      await writer.write(data);
-    } finally {
-      writer.releaseLock();
-    }
+    this._writer ??= this.writable.getWriter();
+    await this._writer.write(data);
   }
 };
 
@@ -103642,7 +103638,7 @@ var import_satisfies = __toESM(require_satisfies(), 1);
 var import_valid = __toESM(require_valid(), 1);
 
 // ../config/build/esm/_version.js
-var PACKAGE_VERSION = "15.0.1";
+var PACKAGE_VERSION = "15.0.4";
 
 // ../config/build/esm/utils.js
 var configDir = import.meta.url.startsWith("file:") ? posix.join(posix.dirname(fileURLToPath(import.meta.url)), import.meta.url.endsWith("src/utils.ts") ? ".." : "../..", "config") : import.meta.resolve("/config");
@@ -108040,7 +108036,7 @@ __name(handleTimeOffsetGet, "handleTimeOffsetGet");
 var import_parse2 = __toESM(require_parse(), 1);
 
 // ../zwave-js/build/esm/lib/_version.js
-var PACKAGE_VERSION2 = "15.0.0";
+var PACKAGE_VERSION2 = "15.0.5";
 var PACKAGE_NAME = "zwave-js";
 
 // ../zwave-js/build/esm/lib/controller/NodeInformationFrame.js
@@ -109067,7 +109063,7 @@ function serialAPICommandErrorToZWaveError(reason, sentMessage, receivedMessage,
   switch (reason) {
     case "CAN":
     case "NAK":
-      return new ZWaveError(`Failed to send the message after 3 attempts`, ZWaveErrorCodes.Controller_MessageDropped, void 0, transactionSource);
+      return new ZWaveError(`Failed to execute controller command`, ZWaveErrorCodes.Controller_MessageDropped, reason, transactionSource);
     case "ACK timeout":
       return new ZWaveError(`Timeout while waiting for an ACK from the controller`, ZWaveErrorCodes.Controller_Timeout, "ACK", transactionSource);
     case "response timeout":
@@ -109076,7 +109072,7 @@ function serialAPICommandErrorToZWaveError(reason, sentMessage, receivedMessage,
       return new ZWaveError(`Timeout while waiting for a callback from the controller`, ZWaveErrorCodes.Controller_Timeout, "callback", transactionSource);
     case "response NOK": {
       if (isSendData(sentMessage)) {
-        return new ZWaveError(`Failed to send the command after ${sentMessage.maxSendAttempts} attempts. Transmission queue full`, ZWaveErrorCodes.Controller_MessageDropped, receivedMessage, transactionSource);
+        return new ZWaveError(`Failed to send the command: Transmission queue full`, ZWaveErrorCodes.Controller_MessageDropped, receivedMessage, transactionSource);
       } else {
         return new ZWaveError(`The controller response indicated failure`, ZWaveErrorCodes.Controller_ResponseNOK, receivedMessage, transactionSource);
       }
@@ -109087,7 +109083,7 @@ function serialAPICommandErrorToZWaveError(reason, sentMessage, receivedMessage,
       }
       if (sentMessage instanceof SendDataRequest || sentMessage instanceof SendDataBridgeRequest) {
         const status = receivedMessage.transmitStatus;
-        return new ZWaveError(`Failed to send the command after ${sentMessage.maxSendAttempts} attempts (Status ${getEnumMemberName(TransmitStatus, status)})`, status === TransmitStatus.NoAck ? ZWaveErrorCodes.Controller_CallbackNOK : ZWaveErrorCodes.Controller_MessageDropped, receivedMessage, transactionSource);
+        return new ZWaveError(`Failed to send the command (Status ${getEnumMemberName(TransmitStatus, status)})`, status === TransmitStatus.NoAck ? ZWaveErrorCodes.Controller_CallbackNOK : ZWaveErrorCodes.Controller_MessageDropped, receivedMessage, transactionSource);
       } else if (sentMessage instanceof SendDataMulticastRequest || sentMessage instanceof SendDataMulticastBridgeRequest) {
         const status = receivedMessage.transmitStatus;
         return new ZWaveError(`One or more nodes did not respond to the multicast request (Status ${getEnumMemberName(TransmitStatus, status)})`, status === TransmitStatus.NoAck ? ZWaveErrorCodes.Controller_CallbackNOK : ZWaveErrorCodes.Controller_MessageDropped, receivedMessage, transactionSource);
@@ -110195,9 +110191,10 @@ var Driver = class extends TypedEventTarget {
       "preferences",
       "vendor"
     ]);
-    const { logConfig, ...rest } = this._options;
+    const { logConfig, host, ...rest } = this._options;
     const newOptions = mergeDeep(cloneDeep(rest), safeOptions, true);
     newOptions.logConfig = logConfig;
+    newOptions.host = host;
     checkOptions(newOptions);
     if (options.userAgent && !isObject(options.userAgent)) {
       throw new ZWaveError(`The userAgent property must be an object!`, ZWaveErrorCodes.Driver_InvalidOptions);
@@ -110325,9 +110322,9 @@ var Driver = class extends TypedEventTarget {
       } catch (e) {
         let message;
         if (/\.yarn[/\\]cache[/\\]zwave-js/i.test(getErrorMessage(e, true))) {
-          message = `Failed to create the cache directory. When using Yarn PnP, you need to change the location with the "storage.cacheDir" driver option.`;
+          message = `Failed to create the cache directory ${this.cacheDir}. When using Yarn PnP, you need to change the location with the "storage.cacheDir" driver option.`;
         } else {
-          message = `Failed to create the cache directory. Please make sure that it is writable or change the location with the "storage.cacheDir" driver option.`;
+          message = `Failed to create the cache directory ${this.cacheDir}. Please make sure that it is writable or change the location with the "storage.cacheDir" driver option.`;
         }
         void this.destroyWithMessage(message);
         return;
@@ -110506,6 +110503,8 @@ var Driver = class extends TypedEventTarget {
           await this.restoreNetworkStructureFromCache();
         }
       });
+      await this.controller.interviewProprietary();
+      this.controllerLog.print("Interview completed");
       if (this.controller.role === ControllerRole.Primary) {
         this.controller.autoProvisionSmartStart();
       }
@@ -113051,13 +113050,20 @@ ${handlers.length} left`);
   async drainSerialAPIQueue() {
     for await (const item of this.serialAPIQueue) {
       const { msg, transactionSource, result } = item;
-      try {
-        const ret = await this.executeSerialAPICommand(msg, transactionSource);
-        result.resolve(ret);
-      } catch (e) {
-        result.reject(e);
-      } finally {
-        this._currentSerialAPICommandPromise = void 0;
+      attempts: for (let attempt = 1; ; attempt++) {
+        try {
+          const ret = await this.executeSerialAPICommand(msg, transactionSource);
+          result.resolve(ret);
+        } catch (e) {
+          if (isZWaveError(e) && e.code === ZWaveErrorCodes.Controller_MessageDropped && e.context === "CAN" && attempt < 3) {
+            await wait(100);
+            continue;
+          }
+          result.reject(e);
+        } finally {
+          this._currentSerialAPICommandPromise = void 0;
+        }
+        break attempts;
       }
     }
   }
@@ -115264,18 +115270,13 @@ function getSupportedNotificationEvents(ctx, node) {
   for (const endpoint of getAllEndpoints(ctx, node)) {
     if (endpoint.supportsCC(CommandClasses["Entry Control"])) {
       const eventTypes = valueDB.getValue(EntryControlCCValues.supportedEventTypes.endpoint(endpoint.index));
-      const dataTypes = valueDB.getValue(EntryControlCCValues.supportedDataTypes.endpoint(endpoint.index));
-      if (eventTypes && dataTypes) {
+      if (eventTypes) {
         const capability = {
           commandClass: CommandClasses["Entry Control"],
           endpoint: endpoint.index,
           supportedEventTypes: Object.fromEntries(eventTypes.map((et2) => [
             et2,
             entryControlEventTypeLabels[et2]
-          ])),
-          supportedDataTypes: Object.fromEntries(dataTypes.map((dt) => [
-            dt,
-            getEnumMemberName(EntryControlDataTypes, dt)
           ]))
         };
         ret.push(capability);
@@ -115977,7 +115978,7 @@ var EndpointsMixin = class extends NodeCapabilityValuesMixin {
     if (index < 0) {
       throw new ZWaveError("The endpoint index must be positive!", ZWaveErrorCodes.Argument_Invalid);
     }
-    if (index === 0)
+    if (!index)
       return this;
     if (!this.isMultiChannelInterviewComplete) {
       this.driver.driverLog.print(`Node ${this.id}, Endpoint ${index}: Trying to access endpoint instance before Multi Channel interview`, "error");
@@ -116879,7 +116880,17 @@ var ZWaveNode = (() => {
     }
     /** Returns a list of all value names that are defined on all endpoints of this node */
     getDefinedValueIDs() {
-      return getDefinedValueIDs(this.driver, this);
+      if (this.isControllerNode) {
+        const proprietary = this.driver.controller.proprietary;
+        for (const impl of Object.values(proprietary)) {
+          if (typeof impl.getDefinedValueIDs === "function") {
+            return impl.getDefinedValueIDs();
+          }
+        }
+        return [];
+      } else {
+        return getDefinedValueIDs(this.driver, this);
+      }
     }
     /**
      * Updates a value for a given property of a given CommandClass on the node.
@@ -116887,6 +116898,12 @@ var ZWaveNode = (() => {
      */
     async setValue(valueId, value, options) {
       valueId = normalizeValueID(valueId);
+      const proprietary = this.driver.controller.proprietary;
+      for (const impl of Object.values(proprietary)) {
+        if (typeof impl.setValue === "function") {
+          return impl.setValue(valueId, value);
+        }
+      }
       const loglevel = this.driver.getLogConfig().level;
       try {
         const endpointInstance = this.getEndpoint(valueId.endpoint || 0);
@@ -117039,6 +117056,12 @@ var ZWaveNode = (() => {
      */
     pollValue(valueId, sendCommandOptions = {}) {
       valueId = normalizeValueID(valueId);
+      const proprietary = this.driver.controller.proprietary;
+      for (const impl of Object.values(proprietary)) {
+        if (typeof impl.pollValue === "function") {
+          return impl.pollValue(valueId);
+        }
+      }
       const endpointInstance = this.getEndpoint(valueId.endpoint || 0);
       if (!endpointInstance) {
         throw new ZWaveError(`Endpoint ${valueId.endpoint} does not exist on Node ${this.id}`, ZWaveErrorCodes.Argument_Invalid);
@@ -119415,7 +119438,7 @@ var VirtualNode = class extends VirtualEndpoint {
     if (index < 0) {
       throw new ZWaveError("The endpoint index must be positive!", ZWaveErrorCodes.Argument_Invalid);
     }
-    if (index === 0)
+    if (!index)
       return this;
     if (!this.isMultiChannelInterviewComplete) {
       this.driver.driverLog.print(`Virtual node ${this.id ?? "??"}, Endpoint ${index}: Trying to access endpoint instance before the Multi Channel interview of all nodes was completed!`, "error");
@@ -119816,6 +119839,297 @@ var SerialNVMIO700 = class {
     return this._close();
   }
 };
+
+// ../zwave-js/build/esm/lib/controller/proprietary/NabuCasa.js
+var FUNC_ID_NABUCASA = FunctionType.Proprietary_F0;
+var NabuCasaCommand;
+(function(NabuCasaCommand2) {
+  NabuCasaCommand2[NabuCasaCommand2["GetSupportedCommands"] = 0] = "GetSupportedCommands";
+  NabuCasaCommand2[NabuCasaCommand2["GetLED"] = 1] = "GetLED";
+  NabuCasaCommand2[NabuCasaCommand2["SetLED"] = 2] = "SetLED";
+  NabuCasaCommand2[NabuCasaCommand2["ReadGyro"] = 3] = "ReadGyro";
+})(NabuCasaCommand || (NabuCasaCommand = {}));
+var colorSwitchCurrentColorRed = ColorSwitchCCValues.currentColorChannel(ColorComponent.Red).id;
+var colorSwitchCurrentColorRedTranslated = {
+  ...colorSwitchCurrentColorRed,
+  commandClassName: getCCName(colorSwitchCurrentColorRed.commandClass),
+  propertyName: colorSwitchCurrentColorRed.property,
+  propertyKeyName: "Red"
+};
+var colorSwitchCurrentColorGreen = ColorSwitchCCValues.currentColorChannel(ColorComponent.Green).id;
+var colorSwitchCurrentColorGreenTranslated = {
+  ...colorSwitchCurrentColorGreen,
+  commandClassName: getCCName(colorSwitchCurrentColorGreen.commandClass),
+  propertyName: colorSwitchCurrentColorGreen.property,
+  propertyKeyName: "Green"
+};
+var colorSwitchCurrentColorBlue = ColorSwitchCCValues.currentColorChannel(ColorComponent.Blue).id;
+var colorSwitchCurrentColorBlueTranslated = {
+  ...colorSwitchCurrentColorBlue,
+  commandClassName: getCCName(colorSwitchCurrentColorBlue.commandClass),
+  propertyName: colorSwitchCurrentColorBlue.property,
+  propertyKeyName: "Blue"
+};
+var colorSwitchCurrentColor = ColorSwitchCCValues.currentColor.id;
+var colorSwitchCurrentColorTranslated = {
+  ...colorSwitchCurrentColor,
+  commandClassName: getCCName(colorSwitchCurrentColor.commandClass),
+  propertyName: colorSwitchCurrentColor.property
+};
+var colorSwitchTargetColor = ColorSwitchCCValues.targetColor.id;
+var colorSwitchTargetColorTranslated = {
+  ...colorSwitchTargetColor,
+  commandClassName: getCCName(colorSwitchTargetColor.commandClass),
+  propertyName: colorSwitchTargetColor.property
+};
+var colorSwitchHexColor = ColorSwitchCCValues.hexColor.id;
+var colorSwitchHexColorTranslated = {
+  ...colorSwitchHexColor,
+  commandClassName: getCCName(colorSwitchHexColor.commandClass),
+  propertyName: colorSwitchHexColor.property
+};
+var multilevelSensorX = MultilevelSensorCCValues.value("Acceleration X-axis").id;
+var multilevelSensorXTranslated = {
+  ...multilevelSensorX,
+  commandClassName: getCCName(multilevelSensorX.commandClass),
+  propertyName: multilevelSensorX.property
+};
+var multilevelSensorY = MultilevelSensorCCValues.value("Acceleration Y-axis").id;
+var multilevelSensorYTranslated = {
+  ...multilevelSensorY,
+  commandClassName: getCCName(multilevelSensorY.commandClass),
+  propertyName: multilevelSensorY.property
+};
+var multilevelSensorZ = MultilevelSensorCCValues.value("Acceleration Z-axis").id;
+var multilevelSensorZTranslated = {
+  ...multilevelSensorZ,
+  commandClassName: getCCName(multilevelSensorZ.commandClass),
+  propertyName: multilevelSensorZ.property
+};
+var ControllerProprietary_NabuCasa = class {
+  static {
+    __name(this, "ControllerProprietary_NabuCasa");
+  }
+  constructor(driver2, controller) {
+    this.driver = driver2;
+    this.controller = controller;
+  }
+  driver;
+  controller;
+  async interview() {
+    const valueDB = this.controller.valueDB;
+    const supported = await this.getSupportedCommands();
+    if (supported.includes(NabuCasaCommand.GetLED)) {
+      const rgb = await this.getLED();
+      valueDB.setMetadata(ColorSwitchCCValues.currentColor.id, ColorSwitchCCValues.currentColor.meta);
+      valueDB.setMetadata(ColorSwitchCCValues.targetColor.id, ColorSwitchCCValues.targetColor.meta);
+      valueDB.setMetadata(ColorSwitchCCValues.currentColorChannel(ColorComponent.Red).id, ColorSwitchCCValues.currentColorChannel(ColorComponent.Red).meta);
+      valueDB.setMetadata(ColorSwitchCCValues.currentColorChannel(ColorComponent.Green).id, ColorSwitchCCValues.currentColorChannel(ColorComponent.Green).meta);
+      valueDB.setMetadata(ColorSwitchCCValues.currentColorChannel(ColorComponent.Blue).id, ColorSwitchCCValues.currentColorChannel(ColorComponent.Blue).meta);
+      this.persistRGBValue(valueDB, rgb);
+    }
+    if (supported.includes(NabuCasaCommand.ReadGyro)) {
+      this.readGyro().then((gyro) => {
+        if (gyro) {
+          for (const sensorType of [52, 53, 54]) {
+            const sensor = getSensor(sensorType);
+            const scale = getSensorScale(sensorType, 0);
+            const sensorName = sensor.label;
+            const sensorValue = MultilevelSensorCCValues.value(sensorName);
+            valueDB.setMetadata(sensorValue.id, {
+              ...sensorValue.meta,
+              unit: scale.unit,
+              ccSpecific: {
+                sensorType,
+                scale: scale.key
+              }
+            });
+          }
+          this.persistGyroValues(valueDB, gyro);
+        }
+      }).catch(noop);
+    }
+  }
+  persistRGBValue(valueDB, rgb) {
+    valueDB.setValue(colorSwitchCurrentColorRed, rgb.r);
+    valueDB.setValue(colorSwitchCurrentColorBlue, rgb.b);
+    valueDB.setValue(colorSwitchCurrentColorGreen, rgb.g);
+    valueDB.setValue(colorSwitchCurrentColor, {
+      red: rgb.r,
+      green: rgb.g,
+      blue: rgb.b
+    });
+  }
+  persistGyroValues(valueDB, gyro) {
+    valueDB.setValue(multilevelSensorX, gyro.x);
+    valueDB.setValue(multilevelSensorY, gyro.y);
+    valueDB.setValue(multilevelSensorZ, gyro.z);
+  }
+  async getSupportedCommands() {
+    const getSupportedCmd = new Message({
+      type: MessageType.Request,
+      functionType: FUNC_ID_NABUCASA,
+      payload: Bytes.from([NabuCasaCommand.GetSupportedCommands]),
+      expectedResponse: /* @__PURE__ */ __name((self2, msg) => {
+        return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Response && msg.payload[0] === NabuCasaCommand.GetSupportedCommands;
+      }, "expectedResponse")
+    });
+    const result = await this.driver.sendMessage(getSupportedCmd, {
+      priority: MessagePriority.Controller,
+      supportCheck: false
+    });
+    const supported = result.payload.subarray(1);
+    return parseBitMask(supported, NabuCasaCommand.GetSupportedCommands);
+  }
+  async getLED() {
+    const getLEDStateCmd = new Message({
+      type: MessageType.Request,
+      functionType: FUNC_ID_NABUCASA,
+      payload: Bytes.from([NabuCasaCommand.GetLED]),
+      expectedResponse: /* @__PURE__ */ __name((self2, msg) => {
+        return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Response && msg.payload[0] === NabuCasaCommand.GetLED;
+      }, "expectedResponse")
+    });
+    const resultPromise = this.driver.sendMessage(getLEDStateCmd, {
+      priority: MessagePriority.Controller,
+      supportCheck: false
+    });
+    const { payload: result } = await resultPromise;
+    return {
+      r: result[1],
+      g: result[2],
+      b: result[3]
+    };
+  }
+  async setLED(rgb) {
+    const payload = Bytes.from([
+      NabuCasaCommand.SetLED,
+      rgb.r,
+      rgb.g,
+      rgb.b
+    ]);
+    const setLEDStateCmd = new Message({
+      type: MessageType.Request,
+      functionType: FUNC_ID_NABUCASA,
+      payload,
+      expectedResponse: /* @__PURE__ */ __name((self2, msg) => {
+        return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Response && msg.payload[0] === NabuCasaCommand.SetLED;
+      }, "expectedResponse")
+    });
+    const result = await this.driver.sendMessage(setLEDStateCmd, {
+      priority: MessagePriority.Controller,
+      supportCheck: false
+    });
+    const success = !!result.payload[1];
+    return success;
+  }
+  async readGyro() {
+    const readGyroCmd = new Message({
+      type: MessageType.Request,
+      functionType: FUNC_ID_NABUCASA,
+      payload: Bytes.from([NabuCasaCommand.ReadGyro]),
+      expectedResponse: /* @__PURE__ */ __name((self2, msg) => {
+        return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Response && msg.payload[0] === NabuCasaCommand.ReadGyro;
+      }, "expectedResponse")
+    });
+    const callbackPromise = this.driver.waitForMessage((msg) => {
+      return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Request && msg.payload[0] === NabuCasaCommand.ReadGyro;
+    }, 1e3);
+    const response = await this.driver.sendMessage(readGyroCmd, {
+      priority: MessagePriority.Controller,
+      supportCheck: false
+    });
+    if (!response.payload[0]) {
+      return;
+    }
+    const callback = await callbackPromise;
+    const x = roundTo(callback.payload.readInt16BE(1) / 1024 * 9.77, 2);
+    const y = roundTo(callback.payload.readInt16BE(3) / 1024 * 9.77, 2);
+    const z = roundTo(callback.payload.readInt16BE(5) / 1024 * 9.77, 2);
+    return { x, y, z };
+  }
+  getDefinedValueIDs() {
+    return [
+      // RGB light: Color Switch
+      colorSwitchCurrentColorRedTranslated,
+      colorSwitchCurrentColorGreenTranslated,
+      colorSwitchCurrentColorBlueTranslated,
+      colorSwitchCurrentColorTranslated,
+      colorSwitchTargetColorTranslated,
+      colorSwitchHexColorTranslated,
+      // Gyro: Multilevel Sensor (X, Y, Z accel)
+      multilevelSensorXTranslated,
+      multilevelSensorYTranslated,
+      multilevelSensorZTranslated
+    ];
+  }
+  async pollValue(valueId) {
+    if (ColorSwitchCCValues.targetColor.is(valueId) || ColorSwitchCCValues.currentColor.is(valueId)) {
+      const rgb = await this.getLED();
+      this.persistRGBValue(this.controller.valueDB, rgb);
+      return rgb;
+    }
+    if (ColorSwitchCCValues.currentColorChannel.is(valueId) || ColorSwitchCCValues.targetColorChannel.is(valueId)) {
+      const rgb = await this.getLED();
+      this.persistRGBValue(this.controller.valueDB, rgb);
+      switch (valueId.propertyKey) {
+        case ColorComponent.Red:
+          return rgb.r;
+        case ColorComponent.Green:
+          return rgb.g;
+        case ColorComponent.Blue:
+          return rgb.b;
+      }
+      return void 0;
+    }
+    if (MultilevelSensorCCValues.value.is(valueId)) {
+      switch (valueId.property) {
+        case "Acceleration X-axis":
+        case "Acceleration Y-axis":
+        case "Acceleration Z-axis":
+          break;
+        default:
+          return void 0;
+      }
+      const gyro = await this.readGyro();
+      if (gyro) {
+        this.persistGyroValues(this.controller.valueDB, gyro);
+        switch (valueId.property) {
+          case "Acceleration X-axis":
+            return gyro.x;
+          case "Acceleration Y-axis":
+            return gyro.y;
+          case "Acceleration Z-axis":
+            return gyro.z;
+        }
+      }
+    }
+  }
+  async setValue(valueId, value) {
+    if (ColorSwitchCCValues.targetColor.is(valueId) && typeof value === "object" && value !== null) {
+      const rgb = {
+        r: value.red ?? 0,
+        g: value.green ?? 0,
+        b: value.blue ?? 0
+      };
+      await this.setLED(rgb);
+      this.persistRGBValue(this.controller.valueDB, rgb);
+      return { status: SetValueStatus.Success };
+    }
+    return { status: SetValueStatus.NoDeviceSupport };
+  }
+};
+
+// ../zwave-js/build/esm/lib/controller/Proprietary.js
+function getControllerProprietary(driver2, controller) {
+  if (controller.manufacturerId === 1126 && controller.productType === 1 && controller.productId === 1) {
+    return {
+      "Nabu Casa": new ControllerProprietary_NabuCasa(driver2, controller)
+    };
+  }
+  return {};
+}
+__name(getControllerProprietary, "getControllerProprietary");
 
 // ../zwave-js/build/esm/lib/controller/ProxyInclusionMachine.js
 function to5(state) {
@@ -121140,6 +121454,14 @@ var ZWaveController = (() => {
         this.driver.controllerLog.print(`serial API timeouts overwritten. The old values were: ack = ${resp.oldAckTimeout} ms, byte = ${resp.oldByteTimeout} ms`);
       }
     }
+    /** @internal */
+    async interviewProprietary() {
+      for (const impl of Object.values(this.proprietary)) {
+        if (typeof impl.interview === "function") {
+          await impl.interview();
+        }
+      }
+    }
     /**
      * @internal
      * Interviews the controller for the necessary information.
@@ -121183,7 +121505,6 @@ var ZWaveController = (() => {
       controllerValueDB.setValue(VersionCCValues.zWaveProtocolVersion.id, this._protocolVersion);
       controllerValueDB.setMetadata(VersionCCValues.sdkVersion.id, VersionCCValues.sdkVersion.meta);
       controllerValueDB.setValue(VersionCCValues.sdkVersion.id, this._sdkVersion);
-      this.driver.controllerLog.print("Interview completed");
     }
     createValueDBForNode(nodeId, ownKeys) {
       return new ValueDB(nodeId, this.driver.valueDB, this.driver.metadataDB, ownKeys);
@@ -125538,6 +125859,14 @@ var ZWaveController = (() => {
       }
       this.emit("network joined");
     }
+    _proprietary;
+    /** Provides access to hardware-specific Serial API functionality */
+    get proprietary() {
+      if (!this._proprietary) {
+        this._proprietary = getControllerProprietary(this.driver, this);
+      }
+      return this._proprietary;
+    }
     destroy() {
       this._nodes.forEach((node) => node.destroy());
       this._nodes.clear();
@@ -125667,6 +125996,10 @@ var btnBootloaderHw = document.getElementById(
 var btnEraseNVM = document.getElementById("erase_nvm");
 var btnGetDSK = document.getElementById("get_dsk");
 var btnGetRegion = document.getElementById("get_region");
+var ledRed = document.getElementById("led_red");
+var ledGreen = document.getElementById("led_green");
+var ledBlue = document.getElementById("led_blue");
+var btnLED = document.getElementById("set_led");
 var driver;
 var port;
 var serialBinding;
@@ -125703,6 +126036,10 @@ function resetUI() {
   btnGetRegion.disabled = true;
   btnBootloader.disabled = true;
   btnBootloaderHw.disabled = true;
+  ledRed.disabled = true;
+  ledGreen.disabled = true;
+  ledBlue.disabled = true;
+  btnLED.disabled = true;
   flashProgress.style.display = "none";
   flashError.innerText = "";
 }
@@ -125773,6 +126110,10 @@ function checkApp() {
   btnRunApp.disabled = driver.mode !== DriverMode.Bootloader;
   btnGetDSK.disabled = driver.mode !== DriverMode.CLI;
   btnGetRegion.disabled = driver.mode !== DriverMode.CLI;
+  btnLED.disabled = driver.mode !== DriverMode.SerialAPI;
+  ledRed.disabled = driver.mode !== DriverMode.SerialAPI;
+  ledGreen.disabled = driver.mode !== DriverMode.SerialAPI;
+  ledBlue.disabled = driver.mode !== DriverMode.SerialAPI;
 }
 __name(checkApp, "checkApp");
 fileInput.addEventListener("change", (event) => {
@@ -125892,6 +126233,13 @@ async function resetToBootloader() {
   await createDriver();
 }
 __name(resetToBootloader, "resetToBootloader");
+async function setLED() {
+  const r = parseInt(ledRed.value, 10);
+  const g = parseInt(ledGreen.value, 10);
+  const b = parseInt(ledBlue.value, 10);
+  await driver.controller.proprietary["Nabu Casa"].setLED({ r, g, b });
+}
+__name(setLED, "setLED");
 document.getElementById("connect").addEventListener("click", init);
 flashButton.addEventListener("click", flash);
 btnEraseNVM.addEventListener("click", eraseNVM);
@@ -125900,6 +126248,7 @@ btnGetDSK.addEventListener("click", getDSK);
 btnGetRegion.addEventListener("click", getRegion);
 btnBootloader.addEventListener("click", enterBootloader);
 btnBootloaderHw.addEventListener("click", resetToBootloader);
+btnLED.addEventListener("click", setLED);
 /*! Bundled license information:
 
 .store/reflect-metadata-npm-0.2.2-5e0bfac201/package/Reflect.js:
