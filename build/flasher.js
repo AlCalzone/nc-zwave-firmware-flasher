@@ -8486,7 +8486,7 @@ var require_package6 = __commonJS({
   "../zwave-js/package.json"(exports5, module) {
     module.exports = {
       name: "zwave-js",
-      version: "15.0.5",
+      version: "15.0.6",
       description: "Z-Wave driver written entirely in JavaScript/TypeScript",
       keywords: [],
       type: "module",
@@ -13704,7 +13704,7 @@ var TransmitOptions;
   TransmitOptions2[TransmitOptions2["NoRoute"] = 16] = "NoRoute";
   TransmitOptions2[TransmitOptions2["Explore"] = 32] = "Explore";
   TransmitOptions2[TransmitOptions2["DEFAULT"] = 37] = "DEFAULT";
-  TransmitOptions2[TransmitOptions2["DEFAULT_NOACK"] = 36] = "DEFAULT_NOACK";
+  TransmitOptions2[TransmitOptions2["DEFAULT_NOACK"] = 0] = "DEFAULT_NOACK";
 })(TransmitOptions || (TransmitOptions = {}));
 var TransmitStatus;
 (function(TransmitStatus2) {
@@ -103638,7 +103638,7 @@ var import_satisfies = __toESM(require_satisfies(), 1);
 var import_valid = __toESM(require_valid(), 1);
 
 // ../config/build/esm/_version.js
-var PACKAGE_VERSION = "15.0.4";
+var PACKAGE_VERSION = "15.0.6";
 
 // ../config/build/esm/utils.js
 var configDir = import.meta.url.startsWith("file:") ? posix.join(posix.dirname(fileURLToPath(import.meta.url)), import.meta.url.endsWith("src/utils.ts") ? ".." : "../..", "config") : import.meta.resolve("/config");
@@ -108036,7 +108036,7 @@ __name(handleTimeOffsetGet, "handleTimeOffsetGet");
 var import_parse2 = __toESM(require_parse(), 1);
 
 // ../zwave-js/build/esm/lib/_version.js
-var PACKAGE_VERSION2 = "15.0.5";
+var PACKAGE_VERSION2 = "15.0.6";
 var PACKAGE_NAME = "zwave-js";
 
 // ../zwave-js/build/esm/lib/controller/NodeInformationFrame.js
@@ -113355,9 +113355,6 @@ ${handlers.length} left`);
     }
     if (options.transmitOptions != void 0) {
       msg.transmitOptions = options.transmitOptions;
-      if (!(options.transmitOptions & TransmitOptions.ACK)) {
-        msg.callbackId = 0;
-      }
     }
     if (!!options.reportTimeoutMs) {
       msg.nodeUpdateTimeout = options.reportTimeoutMs;
@@ -119848,7 +119845,14 @@ var NabuCasaCommand;
   NabuCasaCommand2[NabuCasaCommand2["GetLED"] = 1] = "GetLED";
   NabuCasaCommand2[NabuCasaCommand2["SetLED"] = 2] = "SetLED";
   NabuCasaCommand2[NabuCasaCommand2["ReadGyro"] = 3] = "ReadGyro";
+  NabuCasaCommand2[NabuCasaCommand2["SetSystemIndication"] = 4] = "SetSystemIndication";
 })(NabuCasaCommand || (NabuCasaCommand = {}));
+var IndicationSeverity;
+(function(IndicationSeverity2) {
+  IndicationSeverity2[IndicationSeverity2["None"] = 0] = "None";
+  IndicationSeverity2[IndicationSeverity2["Warning"] = 1] = "Warning";
+  IndicationSeverity2[IndicationSeverity2["Error"] = 2] = "Error";
+})(IndicationSeverity || (IndicationSeverity = {}));
 var colorSwitchCurrentColorRed = ColorSwitchCCValues.currentColorChannel(ColorComponent.Red).id;
 var colorSwitchCurrentColorRedTranslated = {
   ...colorSwitchCurrentColorRed,
@@ -120006,7 +120010,9 @@ var ControllerProprietary_NabuCasa = class {
       NabuCasaCommand.SetLED,
       rgb.r,
       rgb.g,
-      rgb.b
+      rgb.b,
+      1
+      // SOLID
     ]);
     const setLEDStateCmd = new Message({
       type: MessageType.Request,
@@ -120047,6 +120053,26 @@ var ControllerProprietary_NabuCasa = class {
     const y = roundTo(callback.payload.readInt16BE(3) / 1024 * 9.77, 2);
     const z = roundTo(callback.payload.readInt16BE(5) / 1024 * 9.77, 2);
     return { x, y, z };
+  }
+  async setSystemIndication(severity) {
+    const payload = Bytes.from([
+      NabuCasaCommand.SetSystemIndication,
+      severity
+    ]);
+    const systemIndicationCmd = new Message({
+      type: MessageType.Request,
+      functionType: FUNC_ID_NABUCASA,
+      payload,
+      expectedResponse: /* @__PURE__ */ __name((self2, msg) => {
+        return msg.functionType === FUNC_ID_NABUCASA && msg.type === MessageType.Response && msg.payload[0] === NabuCasaCommand.SetSystemIndication;
+      }, "expectedResponse")
+    });
+    const result = await this.driver.sendMessage(systemIndicationCmd, {
+      priority: MessagePriority.Controller,
+      supportCheck: false
+    });
+    const success = !!result.payload[1];
+    return success;
   }
   getDefinedValueIDs() {
     return [
@@ -126000,6 +126026,8 @@ var ledRed = document.getElementById("led_red");
 var ledGreen = document.getElementById("led_green");
 var ledBlue = document.getElementById("led_blue");
 var btnLED = document.getElementById("set_led");
+var selectSystemIndication = document.getElementById("system_indication");
+var btnSetSystemIndication = document.getElementById("set_system_indication");
 var driver;
 var port;
 var serialBinding;
@@ -126040,6 +126068,8 @@ function resetUI() {
   ledGreen.disabled = true;
   ledBlue.disabled = true;
   btnLED.disabled = true;
+  selectSystemIndication.disabled = true;
+  btnSetSystemIndication.disabled = true;
   flashProgress.style.display = "none";
   flashError.innerText = "";
 }
@@ -126114,6 +126144,8 @@ function checkApp() {
   ledRed.disabled = driver.mode !== DriverMode.SerialAPI;
   ledGreen.disabled = driver.mode !== DriverMode.SerialAPI;
   ledBlue.disabled = driver.mode !== DriverMode.SerialAPI;
+  btnSetSystemIndication.disabled = driver.mode !== DriverMode.SerialAPI;
+  selectSystemIndication.disabled = driver.mode !== DriverMode.SerialAPI;
 }
 __name(checkApp, "checkApp");
 fileInput.addEventListener("change", (event) => {
@@ -126240,6 +126272,11 @@ async function setLED() {
   await driver.controller.proprietary["Nabu Casa"].setLED({ r, g, b });
 }
 __name(setLED, "setLED");
+async function setSystemIndication() {
+  const indication = selectSystemIndication.value;
+  await driver.controller.proprietary["Nabu Casa"].setSystemIndication(indication);
+}
+__name(setSystemIndication, "setSystemIndication");
 document.getElementById("connect").addEventListener("click", init);
 flashButton.addEventListener("click", flash);
 btnEraseNVM.addEventListener("click", eraseNVM);
@@ -126249,6 +126286,7 @@ btnGetRegion.addEventListener("click", getRegion);
 btnBootloader.addEventListener("click", enterBootloader);
 btnBootloaderHw.addEventListener("click", resetToBootloader);
 btnLED.addEventListener("click", setLED);
+btnSetSystemIndication.addEventListener("click", setSystemIndication);
 /*! Bundled license information:
 
 .store/reflect-metadata-npm-0.2.2-5e0bfac201/package/Reflect.js:
